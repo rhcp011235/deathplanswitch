@@ -1,0 +1,40 @@
+# Death Plan Switch on nginx with PHP-FPM
+#
+# nginx ignores the .htaccess files that protect this app on Apache, so the
+# "deny" lines below are not optional. The installer checks they work and
+# will not go on until they do.
+#
+# This example serves the app at the top of its own hostname. If you put it
+# in a subfolder, add the folder to each path, for example:
+#     location ~ ^/switch/(data|app|cli|tests|docs)/ { deny all; }
+
+server {
+    listen 443 ssl;
+    server_name switch.example.com;
+
+    # ssl_certificate     /etc/letsencrypt/live/switch.example.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/switch.example.com/privkey.pem;
+
+    root /var/www/switch;    # the folder that holds index.php
+    index index.php;
+
+    # Never serve these. They must come before the PHP block, because nginx
+    # uses the first matching pattern.
+    location ~ ^/(data|app|cli|tests|docs)/ { deny all; }
+    location ~ /\.                          { deny all; }
+    location ~ \.(json|jsonl|bak|lock|md|example)$ { deny all; }
+    location = /config.local.php            { deny all; }
+    location = /LICENSE                     { deny all; }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.4-fpm.sock;   # match your PHP version
+    }
+}
+
+# Send plain HTTP to HTTPS.
+server {
+    listen 80;
+    server_name switch.example.com;
+    return 301 https://$host$request_uri;
+}
