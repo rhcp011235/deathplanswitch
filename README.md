@@ -1,6 +1,6 @@
 # Death Plan Switch
 
-**If you disappear, your clients are covered.**
+**If you disappear, the right people are told.**
 
 This project is open source but doesn't accept pull requests. Fork it freely.
 
