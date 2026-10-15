@@ -10,7 +10,7 @@ declare(strict_types=1);
 
 namespace DPS;
 
-const VERSION = '0.9.0';
+const VERSION = '1.0.0';
 
 if (!defined('DPS_ROOT')) {
     define('DPS_ROOT', dirname(__DIR__));
