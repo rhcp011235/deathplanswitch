@@ -171,7 +171,7 @@ What it does not defend against:
 - Anyone with access to the server can read the data folder.
 - The secret trigger and health addresses appear in your web server's access log. Settings can replace them.
 
-**Reporting a vulnerability:** please email <!-- TODO before publishing: add the security contact address --> **[address to be added before release]** privately rather than opening a public issue.
+**Reporting a vulnerability:** please email Peter **info@tecky.au** privately rather than opening a public issue.
 
 ## Support
 
