@@ -12,4 +12,4 @@ currently being supported with security updates.
 
 ## Reporting a Vulnerability
 
-To report a vulnerability email Peter info@tecky.au. The code will be checked and a new vewrsion number released under best effort support.
+To report a vulnerability email Peter info@tecky.au. The code will be checked and a new version number released under best effort support.
