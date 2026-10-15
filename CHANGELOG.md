@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.0, October 2026
+
+First public release.
+
 ## 0.9.0, October 2026
 
 First version, for testing ahead of public release.
