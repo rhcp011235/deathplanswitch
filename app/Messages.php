@@ -167,10 +167,11 @@ final class Messages
     /**
      * The weekly check-in, and its reminders.
      *
-     * @param int $number 0 for the weekly email, 1 for the first reminder, 2 for the last
+     * @param int $number 0 for the weekly email, then 1 up to $of for the reminders
+     * @param int $of     how many reminders there are; the last says so
      * @param string[] $warnings things on the dashboard that need attention
      */
-    public static function checkin(array $config, string $url, int $number, int $verifyAt, ?array $nok, array $warnings): Email
+    public static function checkin(array $config, string $url, int $number, int $verifyAt, ?array $nok, array $warnings, int $of = 2): Email
     {
         $tz = (string) ($config['timezone'] ?? 'UTC');
         $who = $nok['name'] ?? 'your next of kin';
@@ -182,7 +183,7 @@ final class Messages
                 ->p('This is your weekly check-in. Open the page and press the button to confirm you are here.')
                 ->link('Open the check-in page', $url)
                 ->p("Opening the page is not enough: press the button. If you have not checked in by {$deadline}, {$who} will be asked whether everything is all right.");
-        } elseif ($number === 1) {
+        } elseif ($number < $of) {
             $email = (new Email('Reminder: check in with Death Plan Switch'))
                 ->p('You have not checked in this week. Open the page and press the button to confirm you are here.')
                 ->link('Open the check-in page', $url)
@@ -395,6 +396,15 @@ final class Messages
         $owner = (string) $config['owner_name'];
         return "Hello {$contact['name']}. This is {$owner}'s Death Plan Switch again. It was a false alarm. "
             . "{$owner} has checked in and is fine. You do not need to do anything.";
+    }
+
+    public static function callOwner(array $config, int $verifyAt, ?array $nok): string
+    {
+        $who = $nok['name'] ?? 'your next of kin';
+        $deadline = when($verifyAt, (string) ($config['timezone'] ?? 'UTC'), 'l \a\t g:i a');
+        return 'This is your Death Plan Switch. You have not checked in this week, and this is your last reminder. '
+            . "If you do not check in by {$deadline}, {$who} will be asked whether you are all right. "
+            . 'Open the check-in link in your email or in Telegram, and press the button.';
     }
 
     public static function textTest(): string

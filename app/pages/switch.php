@@ -83,7 +83,11 @@ $short = 'D j M, g:ia';
 // How far along the six-day track we are, in nominal hours (0 to 144).
 $progress = 0.0;
 if ($cycle !== null && $plan !== []) {
-    $nominal = ['email' => 0, 'reminder1' => 24, 'reminder2' => 48, 'verify' => 72, 'nok_reminder' => 120, 'fire' => 144];
+    $nominal = ['email' => 0];
+    foreach (Engine::reminderOffsets($cycle, $engine->config()) as $i => $offset) {
+        $nominal['reminder' . ($i + 1)] = $offset / Schedule::HOUR;
+    }
+    $nominal += ['verify' => 72, 'nok_reminder' => 120, 'fire' => 144];
     $now = Clock::now();
     $keys = array_keys($nominal);
     $progress = 144.0;
@@ -161,10 +165,12 @@ Web::$title = 'Death Plan Switch';
   <progress max="144" value="<?= e(round($progress, 1)) ?>" aria-hidden="true"></progress>
   <ol aria-label="<?= $cycle === null ? 'What happens if you miss the next check-in' : 'Where this check-in stands' ?>">
 <?php
-    $labels = [
-        'email' => ['t0', 'Check-in email'],
-        'reminder1' => ['t24', 'Reminder'],
-        'reminder2' => ['t48', 'Last reminder'],
+    $labels = ['email' => ['t0', 'Check-in email']];
+    $reminderKeys = array_values(array_filter(array_keys($plan), static fn (string $k): bool => str_starts_with($k, 'reminder')));
+    foreach ($reminderKeys as $i => $key) {
+        $labels[$key] = ['t24', $i === count($reminderKeys) - 1 ? 'Last reminder' : 'Reminder'];
+    }
+    $labels += [
         'verify' => ['t72', 'Next of kin is asked'],
         'nok_reminder' => ['t120', 'Next of kin reminded'],
         'fire' => ['t144', 'Other contacts are told'],

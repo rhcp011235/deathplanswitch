@@ -19,21 +19,24 @@ This is a personal fork, set up for one person who lives alone and whose first c
 - **A failing channel is chased.** If either channel is failing at the 72-hour mark, the switch holds and retries that channel every 6 hours. Once a chase gets through, the owner has 6 hours to check in before the next of kin is asked.
 - **The hold has a limit.** A week past the usual 72 hours, the next of kin is asked anyway, so a broken bot cannot stop the switch from ever working. Being asked is not firing: the next of kin can still answer **All fine**. The limit is `CHANNEL_HOLD` in `app/Schedule.php`.
 - **Faults are loud.** A failed Telegram message or a held escalation shows on every page and turns the health address to `503`.
+- **Reminders twice a day, if you want.** Set a second daily time (for example 2pm check-in, 9pm second time). A missed check-in is then chased at both times for three days, six tries in all, before your next of kin is asked. Your next of kin is still asked at 72 hours.
+- **A phone call to you before your family is asked.** Your last reminder can also ring your own mobile. Missed calls are retried, and checking in cancels the call.
 - **Calls and texts to contacts.** Any contact can also be phoned (Twilio) and texted (Textbelt) whenever they are emailed. The call and the text only tell them to read their email, never the message itself. See [Calls and texts](#calls-and-texts).
 - **No wrong numbers.** A contact is only ever phoned at a number they confirmed themselves, on the same page where they confirm their email.
 - **No night calls, no ghost calls.** Calls go out between 8am and 9pm owner time. A call still waiting when the owner checks in is cancelled. Anyone who was called or texted gets the "false alarm" message the same way.
 
 ### How this install is meant to be set up
 
-1. **Mail through a big provider, not your own mail server.** Unreliable email mostly comes from running your own mail server, and the switch never does that. Either of these works in the installer's SMTP step:
+1. **Settings → You, and your weekly email:** timezone `America/New_York`, the check-in at 2pm, and **also remind me at** 9pm. The weekly email then arrives Monday 2pm, with reminders Mon 9pm, Tue 2pm, Tue 9pm, Wed 2pm and Wed 9pm (the last one also phones you). Your next of kin is asked Thursday 2pm. Daylight saving is handled.
+2. **Mail through a big provider, not your own mail server.** Unreliable email mostly comes from running your own mail server, and the switch never does that. Either of these works in the installer's SMTP step:
    - **Gmail:** `smtp.gmail.com`, port 587, TLS. Turn on 2-step verification, then make an **App password** to use as the SMTP password.
    - **iCloud:** `smtp.mail.me.com`, port 587, TLS. Make an **app-specific password** at account.apple.com. The From address must be your iCloud address.
-2. **Add a backup email in Settings, at a different provider** (for example Gmail as the main address, iCloud as the backup). Reminders go to both.
-3. **Link Telegram in Settings** (about 2 minutes, see [Telegram](#telegram)), then press **Send a test message**.
-4. **Set up calls and texts in Settings:** a Twilio account and number for calls, a Textbelt key for texts. Press **Call me** and **Text me** to hear and see what family will get.
-5. **Tick "Phone them" and "Text them" for family on their contact pages.** Send the confirmation again, so they confirm their number.
-6. **Point a free uptime monitor at the health address.** The health address is how you are told the switch itself is broken.
-7. **Rehearse a full escalation** with `tests/timeshift.php`, using addresses you control, before trusting it.
+3. **Add a backup email in Settings, at a different provider** (for example Gmail as the main address, iCloud as the backup). Reminders go to both.
+4. **Link Telegram in Settings** (about 2 minutes, see [Telegram](#telegram)), then press **Send a test message**.
+5. **Set up calls and texts in Settings:** a Twilio account and number for calls, a Textbelt key for texts. Press **Call me** and **Text me** to hear and see what family will get.
+6. **Tick "Phone them" and "Text them" for family on their contact pages.** Send the confirmation again, so they confirm their number.
+7. **Point a free uptime monitor at the health address.** The health address is how you are told the switch itself is broken.
+8. **Rehearse a full escalation** with `tests/timeshift.php`, using addresses you control, before trusting it.
 
 ### What it costs
 
@@ -52,7 +55,7 @@ Everything is counted from the weekly check-in email.
 |---|---|
 | 0 hours | You are emailed a link to the check-in page. Pressing the button there is the check-in. |
 | 24 hours | A reminder, to both of your email addresses. |
-| 48 hours | A last reminder. |
+| 48 hours | A last reminder. With a second daily time set in Settings, there is a reminder at each of your two times on each of the three days instead, and the last can also phone you. |
 | 72 hours | Your next of kin is asked "Is everything all right?", with two answers: **All fine** or **Something's wrong**. You are told this has happened. With Telegram set up, this waits until a reminder has reached you by both email and Telegram (see below). |
 | 120 hours | Your next of kin is reminded. |
 | 144 hours (6 days) | If neither of you has confirmed you are well, every confirmed contact receives the message you wrote for them. |

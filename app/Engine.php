@@ -160,7 +160,7 @@ final class Engine
 
         switch ($state['cycle']['stage']) {
             case 'checkin':
-                foreach (array_keys(Schedule::OWNER_REMINDERS) as $i) {
+                foreach (array_keys(self::reminderOffsets($state['cycle'], $config)) as $i) {
                     $n = $i + 1;
                     $step = $plan['reminder' . $n];
                     if (!$step['done']) {
@@ -217,6 +217,7 @@ final class Engine
             'stage' => 'checkin',
             'tokens' => [$record],
             'reminders' => [],
+            'reminder_offsets' => self::reminderOffsets(null, $config),
             'owner_reached' => array_fill_keys($reached, $now),
             'phoned' => [],
             'chased_at' => null,
@@ -235,13 +236,15 @@ final class Engine
     {
         [$token, $record] = Tokens::issue(Schedule::CHECKIN_TOKEN_TTL);
         $plan = self::plan($state['cycle'], null);
+        $of = count(self::reminderOffsets($state['cycle'], $config));
         $email = Messages::checkin(
             $config,
             $this->url($config, 'checkin.php', ['t' => $token]),
             $number,
             $plan['verify']['at'],
             $this->contacts->nok(),
-            array_column($this->warnings(), 'text')
+            array_column($this->warnings(), 'text'),
+            $of
         );
         $reached = $this->outbox->toOwner($this->ownerAddresses($config), $email);
         if ($reached === []) {
@@ -254,6 +257,55 @@ final class Engine
         $this->saveState($state);
         $this->store->log('cycle.reminder', "Reminder {$number} sent to the owner.");
         $did[] = "Sent reminder {$number} to the owner.";
+
+        // The last reminder also rings the owner's own phone, if they asked for that.
+        if ($number === $of && !empty($config['call_owner']) && Outbox::callReady($config)
+            && ($phone = Phone::e164((string) ($config['owner_phone'] ?? ''))) !== null) {
+            $state['phone_queue'][] = [
+                'kind' => 'call',
+                'body' => Messages::callOwner($config, $plan['verify']['at'], $this->contacts->nok()),
+                'call_id' => null,
+                'contact' => 'owner',
+                'to' => $phone,
+                'event' => 'owner_last',
+                'cycle' => $state['cycle']['id'],
+                'attempts' => 0,
+                'not_before' => Clock::now(),
+            ];
+            $this->saveState($state);
+        }
+    }
+
+    /**
+     * When the owner is reminded, in seconds after the weekly email. With a
+     * second daily time set, there is a reminder at each of the two times
+     * for three days; otherwise one a day.
+     *
+     * @param array|null $cycle a cycle keeps the timing it started with, so
+     *                          changing the setting mid-cycle moves nothing
+     * @return int[]
+     */
+    public static function reminderOffsets(?array $cycle, array $config): array
+    {
+        if (isset($cycle['reminder_offsets'])) {
+            return array_map('intval', (array) $cycle['reminder_offsets']);
+        }
+        if ($cycle !== null) {
+            return Schedule::OWNER_REMINDERS; // started before this setting existed
+        }
+        $second = $config['second_hour'] ?? null;
+        $shift = $second === null ? 0 : ((((int) $second - (int) ($config['slot_hour'] ?? 9)) % 24) + 24) % 24 * Schedule::HOUR;
+        if ($shift === 0) {
+            return Schedule::OWNER_REMINDERS;
+        }
+        $offsets = [];
+        for ($day = 0; $day * Schedule::DAY < Schedule::OWNER_WINDOW; $day++) {
+            if ($day > 0) {
+                $offsets[] = $day * Schedule::DAY;
+            }
+            $offsets[] = $day * Schedule::DAY + $shift;
+        }
+        return $offsets;
     }
 
     /** @param string[] $channels */
@@ -386,12 +438,13 @@ final class Engine
                 $keep[] = $job;
                 continue;
             }
-            $contact = $this->contacts->find((string) $job['contact']);
-            $to = $contact !== null ? Contacts::phoneTo($contact) : null;
+            $owner = $job['contact'] === 'owner';
+            $contact = $owner ? null : $this->contacts->find((string) $job['contact']);
+            $to = $owner ? Phone::e164((string) ($config['owner_phone'] ?? '')) : ($contact !== null ? Contacts::phoneTo($contact) : null);
             if ($to === null) {
                 continue; // deleted, or their number changed since: drop it
             }
-            $who = (string) $contact['name'];
+            $who = $owner ? 'you' : (string) $contact['name'];
 
             if ($job['kind'] === 'text') {
                 if ($this->outbox->text($to, (string) $job['body'], $who)) {
@@ -411,7 +464,8 @@ final class Engine
                 }
                 $job['call_id'] = null; // missed: try again below
             } else {
-                if (!Phone::callableHour($now, (string) ($config['timezone'] ?? 'UTC'))) {
+                // The owner chose their own reminder times; contacts are only rung in the daytime.
+                if (!$owner && !Phone::callableHour($now, (string) ($config['timezone'] ?? 'UTC'))) {
                     $keep[] = $job; // waits for the morning
                     continue;
                 }
@@ -446,7 +500,7 @@ final class Engine
     /** Remember who was phoned this cycle, so a false alarm reaches them the same way. */
     private function markPhoned(array &$state, array $job, string $how): void
     {
-        if ($job['cycle'] !== null && ($state['cycle']['id'] ?? null) === $job['cycle']) {
+        if ($job['contact'] !== 'owner' && $job['cycle'] !== null && ($state['cycle']['id'] ?? null) === $job['cycle']) {
             $state['cycle']['phoned'][$job['contact']][$how] = true;
         }
     }
@@ -1223,6 +1277,10 @@ final class Engine
             $out[] = ['key' => 'phone', 'level' => 'bad', 'text' => 'The last call or text did not get through (' . relative((int) $error['at']) . '): ' . $error['error']];
         }
 
+        if (!empty($config['call_owner']) && (!Outbox::callReady($config) || Phone::e164((string) ($config['owner_phone'] ?? '')) === null)) {
+            $out[] = ['key' => 'phone', 'level' => 'warn', 'text' => 'You asked to be called with your last reminder, but calls or your mobile number are not set up in Settings.'];
+        }
+
         $textsLeft = $mail['texts_left'] ?? $config['textbelt']['quota'] ?? null;
         if (Outbox::textReady($config) && $textsLeft !== null && $textsLeft < Schedule::TEXTS_LOW) {
             $out[] = ['key' => 'texts', 'level' => $textsLeft === 0 ? 'bad' : 'warn', 'text' => "Your Textbelt key has {$textsLeft} texts left. Buy more, then save the new key in Settings."];
@@ -1286,7 +1344,7 @@ final class Engine
      *
      * @return array<string, array{at: int, done: bool}>
      */
-    public static function plan(?array $cycle, ?int $nextDue): array
+    public static function plan(?array $cycle, ?int $nextDue, array $config = []): array
     {
         $start = $cycle['started_at'] ?? $nextDue;
         if ($start === null) {
@@ -1297,10 +1355,13 @@ final class Engine
         $plan = ['email' => ['at' => (int) $start, 'done' => $cycle !== null]];
 
         $previous = null;
-        foreach (Schedule::OWNER_REMINDERS as $i => $offset) {
-            $at = $reminders[$i] ?? max($start + $offset, $previous === null ? 0 : $previous + $gap);
+        $previousOffset = 0;
+        foreach (self::reminderOffsets($cycle, $config) as $i => $offset) {
+            // Reminders closer together than the usual gap keep their own spacing after an outage.
+            $at = $reminders[$i] ?? max($start + $offset, $previous === null ? 0 : $previous + min($gap, $offset - $previousOffset));
             $plan['reminder' . ($i + 1)] = ['at' => (int) $at, 'done' => isset($reminders[$i])];
             $previous = $at;
+            $previousOffset = $offset;
         }
 
         $verify = $cycle['verify'] ?? null;
@@ -1339,7 +1400,7 @@ final class Engine
         return [
             'mode' => $mode,
             'state' => $state,
-            'plan' => $state['armed'] && $state['paused_until'] === null ? self::plan($cycle, $state['next_due_at']) : [],
+            'plan' => $state['armed'] && $state['paused_until'] === null ? self::plan($cycle, $state['next_due_at'], $this->config()) : [],
         ];
     }
 

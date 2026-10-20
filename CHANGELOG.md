@@ -7,6 +7,8 @@
 - Telegram failures, and a held escalation, show on every page and on the health address.
 - Calls (Twilio) and texts (Textbelt) to contacts, alongside their emails: to the next of kin when asked and reminded (the text carries the answer links), to every contact when the switch fires, and a false-alarm call or text to anyone reached that way if the owner checks in.
 - Contacts are only phoned at a number they confirmed, on the page where they confirm their email. Calls only go out between 8am and 9pm owner time, are retried 3 times if missed, and are cancelled if the owner checks in first. The owner's message itself never goes by phone.
+- An optional second daily reminder time: a missed check-in is chased at both times for three days (for example 2pm and 9pm, six tries) before the next of kin is asked at 72 hours. Each cycle keeps the timing it started with. Close-together reminders keep their own spacing after a cron outage.
+- An optional call to the owner's own mobile with the last reminder, not limited to daytime hours, retried if missed and cancelled by checking in.
 - Settings: Twilio and Textbelt setup, with a test call and test text to the owner. A warning when texts are running low.
 
 ## 1.0.0, October 2026
