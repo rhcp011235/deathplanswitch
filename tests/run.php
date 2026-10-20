@@ -1368,6 +1368,108 @@ test('phone numbers are put in international form', function (): void {
 });
 
 // ---------------------------------------------------------------------------
+// Reminder times, and a call to the owner
+// ---------------------------------------------------------------------------
+
+/** An armed install in New York, checking in at 2pm, reminded at 2pm and 9pm. Runs to the weekly email. */
+function newYork(?int $second = 21, bool $callOwner = false): World
+{
+    $w = World::armed()->withPhones();
+    $config = $w->store->read('config');
+    $config['timezone'] = 'America/New_York';
+    $config['slot_hour'] = 14;
+    $config['second_hour'] = $second;
+    $config['owner_phone'] = '(555) 010-0199';
+    $config['call_owner'] = $callOwner;
+    $w->store->write('config', $config);
+    $w->engine->checkIn('test');
+    while ($w->state()['cycle'] === null) {
+        Clock::advance(H);
+        $w->engine->tick();
+    }
+    return $w;
+}
+
+function ny(int $ts): string
+{
+    return \DPS\when($ts, 'America/New_York', 'D H:i');
+}
+
+test('with a second time, reminders come at both times for three days', function (): void {
+    $w = newYork();
+    same('Mon 14:00', ny($w->state()['cycle']['started_at']), 'the weekly email at 2pm New York time');
+    $w->hours(72);
+    $sent = array_map(static fn (array $m): string => ny($m['at']), $w->to(World::OWNER, 'eminder'));
+    same(['Mon 21:00', 'Tue 14:00', 'Tue 21:00', 'Wed 14:00', 'Wed 21:00'], $sent, 'five reminders, afternoon and night');
+    $subjects = array_column($w->to(World::OWNER, 'eminder'), 'subject');
+    check(str_starts_with(end($subjects), 'Last reminder'), 'only the last says it is the last');
+    check(str_starts_with($subjects[3], 'Reminder'), 'the others do not');
+    $asked = $w->to(World::NOK, 'all right');
+    same(1, count($asked), 'the next of kin is asked');
+    same('Thu 14:00', ny($asked[0]['at']), 'at 72 hours, as before');
+});
+
+test('without a second time, reminders stay once a day', function (): void {
+    $w = newYork(null);
+    $w->hours(72);
+    $sent = array_map(static fn (array $m): string => ny($m['at']), $w->to(World::OWNER, 'eminder'));
+    same(['Tue 14:00', 'Wed 14:00'], $sent, 'two reminders');
+});
+
+test('changing the reminder times mid-week moves nothing until the next check-in email', function (): void {
+    $w = newYork(null);
+    $config = $w->store->read('config');
+    $config['second_hour'] = 21;
+    $w->store->write('config', $config);
+    $w->hours(72);
+    same(2, count($w->to(World::OWNER, 'eminder')), 'this week keeps its timing');
+});
+
+test('after an outage, close-together reminders still go one at a time', function (): void {
+    $w = newYork();
+    $w->outage(30); // to Tue 20:00, two reminders overdue
+    $w->hours(30);
+    $sent = array_column($w->to(World::OWNER, 'eminder'), 'at');
+    check(count($sent) >= 2, 'reminders resume');
+    for ($i = 1; $i < count($sent); $i++) {
+        check($sent[$i] - $sent[$i - 1] >= 7 * H, 'never bunched together');
+    }
+});
+
+test('the owner is called with the last reminder, even at 9pm', function (): void {
+    $w = newYork(21, true);
+    $w->hours(54);
+    same([], $w->phones->callsTo('+15550100199'), 'no call before the last reminder');
+    $w->hours(1);
+    $calls = $w->phones->callsTo('+15550100199');
+    same(1, count($calls), 'called with the last reminder');
+    same('Wed 21:00', ny($calls[0]['at']), 'at 9pm: the owner chose that time, so daytime rules do not apply');
+    check(str_contains($calls[0]['script'], 'Kim Rivers will be asked'), 'the call says what happens next');
+});
+
+test('a missed call to the owner is retried, and checking in stops it', function (): void {
+    $w = newYork(21, true);
+    $w->phones->answer = 'missed';
+    $w->hours(56);
+    same(1, count($w->phones->callsTo('+15550100199')), 'first call');
+    Clock::advance(31 * 60);
+    $w->engine->tick();
+    same(2, count($w->phones->callsTo('+15550100199')), 'retried');
+    $w->engine->checkIn('the dashboard');
+    $w->hours(24);
+    same(2, count($w->phones->callsTo('+15550100199')), 'no more calls after checking in');
+    same([], $w->phones->textsTo(World::NOK_PHONE), 'and the next of kin never hears');
+});
+
+test('checking in before the last reminder means the owner is never called', function (): void {
+    $w = newYork(21, true);
+    $w->hours(40);
+    $w->engine->checkIn('the dashboard');
+    $w->hours(48);
+    same([], $w->phones->callsTo('+15550100199'), 'no call');
+});
+
+// ---------------------------------------------------------------------------
 
 $only = $argv[1] ?? null;
 $started = microtime(true);

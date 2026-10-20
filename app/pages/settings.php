@@ -20,17 +20,27 @@ if (Web::posted()) {
             $tz = Web::post('timezone');
             $dow = (int) Web::post('slot_dow', '1');
             $hour = (int) Web::post('slot_hour', '9');
+            $second = Web::post('second_hour') === '' ? null : (int) Web::post('second_hour');
+            if ($second !== null && ($second < 0 || $second > 23 || $second === $hour)) {
+                $second = null;
+            }
             if ($name === '' || !Setup::validTimezone($tz) || $dow < 1 || $dow > 7 || $hour < 0 || $hour > 23) {
                 Web::flash('Enter your name, and choose a timezone, a day and an hour.', 'bad');
                 break;
             }
-            $store->locked(static function () use ($store, $engine, $name, $tz, $dow, $hour): void {
+            $store->locked(static function () use ($store, $engine, $name, $tz, $dow, $hour, $second): void {
                 $config = $store->read('config');
                 $slotChanged = [$config['timezone'], $config['slot_dow'], $config['slot_hour']] !== [$tz, $dow, $hour];
                 $config['owner_name'] = $name;
                 $config['timezone'] = $tz;
                 $config['slot_dow'] = $dow;
                 $config['slot_hour'] = $hour;
+                if (($config['second_hour'] ?? null) !== $second) {
+                    $store->log('settings.reminders', $second === null
+                        ? 'Reminders are now sent once a day.'
+                        : 'Reminders are now sent twice a day, also at ' . hourLabel($second) . '. This applies from the next check-in email.');
+                }
+                $config['second_hour'] = $second;
                 $store->write('config', $config);
                 if ($slotChanged) {
                     $state = $engine->state();
@@ -204,7 +214,14 @@ if (Web::posted()) {
                 break;
             }
             $config['owner_phone'] = Web::post('test_phone');
+            if (Outbox::callReady($config)) {
+                $config['call_owner'] = isset($_POST['call_owner']);
+            }
             $store->write('config', $config);
+            if (Web::post('how') === 'save') {
+                Web::flash('Saved.' . (!empty($config['call_owner']) ? ' You will be called with your last reminder.' : ''));
+                break;
+            }
             if (Web::post('how') === 'call') {
                 $ok = Outbox::callReady($config) && $outbox->call($to, Messages::callTest($config), 'you') !== null;
                 $sent = 'A test call is on its way. It should ring within a minute.';
@@ -348,6 +365,16 @@ Web::$title = 'Settings: Death Plan Switch';
       </select>
     </div>
     <span class="help">Pick a time you reliably read email. The interval is fixed at one week.</span>
+  </div>
+  <div class="field">
+    <label for="second_hour">If you miss it, also remind me at</label>
+    <select id="second_hour" name="second_hour">
+      <option value="">No second time: once a day</option>
+<?php for ($h = 0; $h < 24; $h++): ?>
+      <option value="<?= $h ?>"<?= isset($config['second_hour']) && $h === (int) $config['second_hour'] ? ' selected' : '' ?>><?= e(hourLabel($h)) ?></option>
+<?php endfor ?>
+    </select>
+    <span class="help">With a second time, a missed check-in is chased at both times each day for three days, for example 2pm and 9pm: six tries before your next of kin is asked, instead of three. It takes effect from the next check-in email.</span>
   </div>
   <div class="actions"><button type="submit">Save</button></div>
 </form>
@@ -509,7 +536,7 @@ Web::$title = 'Settings: Death Plan Switch';
 </details>
 
 <?php if (Outbox::callReady($config) || Outbox::textReady($config)): ?>
-<h3>Try it on yourself</h3>
+<h3>Your own mobile</h3>
 <form method="post" action="index.php?p=settings">
   <?= Web::csrfField() ?>
   <input type="hidden" name="action" value="phone_test">
@@ -517,7 +544,15 @@ Web::$title = 'Settings: Death Plan Switch';
     <label for="test_phone">Your mobile</label>
     <input type="tel" id="test_phone" name="test_phone" value="<?= e($config['owner_phone'] ?? '') ?>" maxlength="40" autocomplete="off" required>
   </div>
+<?php if (Outbox::callReady($config)): ?>
+  <div class="tick">
+    <input type="checkbox" id="call_owner" name="call_owner" value="1"<?= !empty($config['call_owner']) ? ' checked' : '' ?>>
+    <label for="call_owner">Call me with my last reminder, before my next of kin is asked</label>
+    <span class="help">A computer voice tells you that you have not checked in, and when your next of kin will be asked. Missed calls are tried <?= Schedule::CALL_ATTEMPTS ?> times. Checking in cancels it. A few cents, and only when you have missed every other reminder.</span>
+  </div>
+<?php endif ?>
   <div class="actions">
+    <button type="submit" name="how" value="save">Save</button>
 <?php if (Outbox::callReady($config)): ?>
     <button class="button-quiet" type="submit" name="how" value="call">Call me</button>
 <?php endif ?>
