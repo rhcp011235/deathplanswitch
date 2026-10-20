@@ -31,6 +31,11 @@ namespace DPS;
  * delivered on both, so one message lost to a spam folder or a dead
  * channel cannot start the escalation on its own.
  *
+ * Contacts can also be called and texted, at a number they have confirmed.
+ * That happens alongside their emails, never instead of them, and never
+ * holds anything up: texts go at once, calls wait for daytime and are
+ * retried if missed. Checking in cancels any call not yet made.
+ *
  * The owner can check in at any stage. Anyone already contacted is then
  * told it was a false alarm.
  */
@@ -73,6 +78,7 @@ final class Engine
             'review_asked_at' => null,
             'after_fire_at' => null,
             'all_clear_queue' => [],
+            'phone_queue' => [],
         ];
     }
 
@@ -130,6 +136,8 @@ final class Engine
             if ($state['armed'] && $state['paused_until'] === null) {
                 $this->advance($state, $config, $now, $did);
             }
+
+            $this->runPhoneQueue($state, $config, $now, $did);
 
             $this->saveState($state);
             return $did ?: ['Nothing due.'];
@@ -210,6 +218,7 @@ final class Engine
             'tokens' => [$record],
             'reminders' => [],
             'owner_reached' => array_fill_keys($reached, $now),
+            'phoned' => [],
             'chased_at' => null,
             'verify' => null,
             'fired_at' => null,
@@ -326,12 +335,138 @@ final class Engine
         return implode(' or ', array_map([self::class, 'channelName'], $channels));
     }
 
+    // ------------------------------------------------------------------
+    // Calls and texts to contacts
+    // ------------------------------------------------------------------
+
+    /**
+     * Text a contact now, and queue a call, as the owner chose for them.
+     * Never at a number the contact has not confirmed.
+     *
+     * @param string      $event    'verify', 'fired' or 'all_clear'
+     * @param string|null $fallback the text without links, tried if the first is refused
+     * @param string[]    $only     limit to 'text' and/or 'call'
+     */
+    private function phoneContact(array &$state, array $config, array $contact, string $event, string $text, ?string $fallback, string $script, array $only = ['text', 'call']): void
+    {
+        $to = Contacts::phoneTo($contact);
+        if ($to === null) {
+            return;
+        }
+        $job = [
+            'contact' => $contact['id'],
+            'event' => $event,
+            'cycle' => $event === 'all_clear' ? null : ($state['cycle']['id'] ?? null),
+            'attempts' => 0,
+            'not_before' => Clock::now(),
+        ];
+        if (in_array('text', $only, true) && !empty($contact['text']) && Outbox::textReady($config)) {
+            if ($this->outbox->text($to, $text, $contact['name'], $fallback)) {
+                $this->markPhoned($state, $job, 'text');
+            } else {
+                // Retried later, without links: the queue is saved in state.json, which holds no usable links.
+                $state['phone_queue'][] = ['kind' => 'text', 'body' => $fallback ?? $text, 'attempts' => 1, 'not_before' => Clock::now() + Schedule::CALL_RETRY] + $job;
+            }
+        }
+        if (in_array('call', $only, true) && !empty($contact['call']) && Outbox::callReady($config)) {
+            $state['phone_queue'][] = ['kind' => 'call', 'body' => $script, 'call_id' => null] + $job;
+        }
+        $this->saveState($state);
+    }
+
+    /** Make the calls that are due, check on calls already made, and retry what failed. */
+    private function runPhoneQueue(array &$state, array $config, int $now, array &$did): void
+    {
+        if ($state['phone_queue'] === []) {
+            return;
+        }
+        $keep = [];
+        foreach ((array) $state['phone_queue'] as $job) {
+            if ($job['not_before'] > $now) {
+                $keep[] = $job;
+                continue;
+            }
+            $contact = $this->contacts->find((string) $job['contact']);
+            $to = $contact !== null ? Contacts::phoneTo($contact) : null;
+            if ($to === null) {
+                continue; // deleted, or their number changed since: drop it
+            }
+            $who = (string) $contact['name'];
+
+            if ($job['kind'] === 'text') {
+                if ($this->outbox->text($to, (string) $job['body'], $who)) {
+                    $this->markPhoned($state, $job, 'text');
+                    $did[] = "Texted {$who}.";
+                    continue;
+                }
+            } elseif (!empty($job['call_id'])) {
+                $status = $this->outbox->callStatus((string) $job['call_id'], $to, $who);
+                if ($status === 'pending' && $now - (int) ($job['placed_at'] ?? $now) < 2 * Schedule::HOUR) {
+                    $keep[] = $job;
+                    continue;
+                }
+                if ($status === 'answered') {
+                    $did[] = "The call to {$who} was answered.";
+                    continue;
+                }
+                $job['call_id'] = null; // missed: try again below
+            } else {
+                if (!Phone::callableHour($now, (string) ($config['timezone'] ?? 'UTC'))) {
+                    $keep[] = $job; // waits for the morning
+                    continue;
+                }
+                $id = $this->outbox->call($to, (string) $job['body'], $who);
+                if ($id !== null) {
+                    $job['call_id'] = $id;
+                    $job['placed_at'] = $now;
+                    $job['attempts']++;
+                    $this->markPhoned($state, $job, 'call');
+                    $keep[] = $job;
+                    $did[] = "Calling {$who}.";
+                    continue;
+                }
+                $job['attempts']++;
+            }
+
+            if ($job['kind'] === 'text') {
+                $job['attempts']++;
+            }
+            if ($job['attempts'] >= Schedule::CALL_ATTEMPTS) {
+                $this->store->log('phone.gave_up', ($job['kind'] === 'call' ? 'Gave up calling ' : 'Gave up texting ') . "{$who} after {$job['attempts']} tries.");
+                $did[] = "Gave up trying to reach {$who} by phone.";
+                continue;
+            }
+            $job['not_before'] = $now + Schedule::CALL_RETRY;
+            $keep[] = $job;
+        }
+        $state['phone_queue'] = $keep;
+        $this->saveState($state);
+    }
+
+    /** Remember who was phoned this cycle, so a false alarm reaches them the same way. */
+    private function markPhoned(array &$state, array $job, string $how): void
+    {
+        if ($job['cycle'] !== null && ($state['cycle']['id'] ?? null) === $job['cycle']) {
+            $state['cycle']['phoned'][$job['contact']][$how] = true;
+        }
+    }
+
+    /** Drop calls and texts not yet made about a cycle that has ended. False-alarm notices stay. */
+    private function cancelPhoneJobs(array &$state): void
+    {
+        $state['phone_queue'] = array_values(array_filter(
+            (array) $state['phone_queue'],
+            static fn (array $job): bool => $job['event'] === 'all_clear'
+        ));
+    }
+
     private function askNextOfKin(array &$state, array $config, int $now, array &$did): void
     {
         $fireAt = $now + Schedule::NOK_WINDOW;
         $nok = $this->confirmedNok();
         $verifyTokens = [];
         $reached = false;
+        $token = null;
 
         if ($nok !== null) {
             [$token, $record] = Tokens::issue(Schedule::NOK_WINDOW + 30 * Schedule::DAY);
@@ -371,6 +506,25 @@ final class Engine
             ? 'No check-in after 72 hours. The next of kin has been asked.'
             : 'No check-in after 72 hours. The next of kin could not be emailed; the 72-hour wait has started anyway.');
         $did[] = $reached ? 'Asked the next of kin.' : 'Could not email the next of kin. Waiting 72 hours before notifying the others.';
+        if ($nok !== null && $token !== null) {
+            $this->phoneVerify($state, $config, $nok, $token);
+        }
+    }
+
+    /** Text and call the next of kin with the same question their email asks. */
+    private function phoneVerify(array &$state, array $config, array $nok, string $token): void
+    {
+        $fine = $this->url($config, 'respond.php', ['t' => $token, 'a' => 'fine']);
+        $wrong = $this->url($config, 'respond.php', ['t' => $token, 'a' => 'wrong']);
+        $this->phoneContact(
+            $state,
+            $config,
+            $nok,
+            'verify',
+            Messages::textVerify($config, $nok, $fine, $wrong),
+            Messages::textVerify($config, $nok, null, null),
+            Messages::callVerify($config, $nok)
+        );
     }
 
     private function remindNextOfKin(array &$state, array $config, int $now, array &$did): void
@@ -390,6 +544,7 @@ final class Engine
             if ($sent) {
                 $state['cycle']['verify']['reached'] = true;
             }
+            $this->phoneVerify($state, $config, $nok, $token);
         }
         // Best effort: a next of kin who cannot be emailed must not hold the switch up for ever.
         $state['cycle']['verify']['reminded_at'] = $now;
@@ -409,6 +564,9 @@ final class Engine
             ? 'The next of kin answered "Something\'s wrong". The switch has fired.'
             : 'Neither the owner nor the next of kin confirmed all is well. The switch has fired.');
         $did[] = 'The switch fired.';
+        foreach ($this->contacts->confirmed() as $contact) {
+            $this->phoneContact($state, $config, $contact, 'fired', Messages::textFired($config, $contact), null, Messages::callFired($config, $contact));
+        }
         $this->deliverFired($state, $config, $did);
     }
 
@@ -474,8 +632,16 @@ final class Engine
         }
 
         $state['cycle'] = null;
+        $this->cancelPhoneJobs($state);
         if ($cycle['stage'] === 'fired') {
             $state['after_fire_at'] = Clock::now();
+        }
+        // Anyone who was called or texted is told the same way.
+        foreach ((array) ($cycle['phoned'] ?? []) as $id => $how) {
+            $contact = $this->contacts->find((string) $id);
+            if ($contact !== null) {
+                $this->phoneContact($state, $config, $contact, 'all_clear', Messages::textAllClear($config), null, Messages::callAllClear($config, $contact), array_keys((array) $how));
+            }
         }
         $state['all_clear_queue'] = array_values(array_unique(array_merge(
             (array) $state['all_clear_queue'],
@@ -785,6 +951,7 @@ final class Engine
             // "All fine": this cycle ends and nobody else is contacted.
             $nok = $this->contacts->nok();
             $state['cycle'] = null;
+            $this->cancelPhoneJobs($state);
             $state['next_due_at'] = $this->nextSlot($config, $now);
             $this->saveState($state);
             $this->store->log('cycle.vouched', 'The next of kin answered "All fine". Nobody else was contacted.');
@@ -859,6 +1026,8 @@ final class Engine
                 }
                 $contact['pending_email'] = null;
                 $contact['status'] = 'confirmed';
+                // The number shown on the page they confirmed from is the one they agreed to be called on.
+                $contact['phone_confirmed'] = Phone::e164((string) ($contact['phone'] ?? ''));
                 $contact['confirmed_at'] ??= $now;
                 $contact['reconfirmed_at'] = $now;
                 $contact['reconfirm_asked_at'] = null;
@@ -1049,6 +1218,16 @@ final class Engine
                 . self::channelNames($missing) . '. Your next of kin will be asked once they do, or a week after the usual 72 hours.'];
         }
 
+        if (!empty($mail['phone_error']) && (Outbox::textReady($config) || Outbox::callReady($config))) {
+            $error = $mail['phone_error'];
+            $out[] = ['key' => 'phone', 'level' => 'bad', 'text' => 'The last call or text did not get through (' . relative((int) $error['at']) . '): ' . $error['error']];
+        }
+
+        $textsLeft = $mail['texts_left'] ?? $config['textbelt']['quota'] ?? null;
+        if (Outbox::textReady($config) && $textsLeft !== null && $textsLeft < Schedule::TEXTS_LOW) {
+            $out[] = ['key' => 'texts', 'level' => $textsLeft === 0 ? 'bad' : 'warn', 'text' => "Your Textbelt key has {$textsLeft} texts left. Buy more, then save the new key in Settings."];
+        }
+
         if (!empty($mail['last_send_error'])) {
             $error = $mail['last_send_error'];
             $out[] = ['key' => 'mail', 'level' => 'bad', 'text' => 'The last email could not be sent (' . relative((int) $error['at']) . '): ' . $error['error']];
@@ -1072,6 +1251,11 @@ final class Engine
             } elseif ($contact['status'] === 'unconfirmed') {
                 $out[] = ['key' => 'contact', 'level' => 'warn', 'text' => "{$name} has not confirmed, so will not be contacted."];
             } else {
+                if (Contacts::phoneUnconfirmed($contact)) {
+                    $out[] = ['key' => 'contact', 'level' => 'warn', 'text' => "{$name} has not confirmed their phone number, so will not be called or texted. Ask them to confirm it from their page."];
+                } elseif ((!empty($contact['call']) && !Outbox::callReady($config)) || (!empty($contact['text']) && !Outbox::textReady($config))) {
+                    $out[] = ['key' => 'contact', 'level' => 'warn', 'text' => "{$name} is set to be called or texted, but calls or texts are not set up in Settings."];
+                }
                 if (!empty($contact['pending_email'])) {
                     $out[] = ['key' => 'contact', 'level' => 'warn', 'text' => "{$name} has not confirmed their new address. The old one is still in use."];
                 }

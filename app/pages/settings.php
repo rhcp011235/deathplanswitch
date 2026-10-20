@@ -11,7 +11,7 @@ Web::requireOwner();
 $engine = engine();
 $store = store();
 $config = $engine->config();
-$outbox = new Outbox($store, new SmtpTransport(), new Telegram());
+$outbox = new Outbox($store, new SmtpTransport(), new Telegram(), new Textbelt(), new Twilio());
 
 if (Web::posted()) {
     switch (Web::post('action')) {
@@ -149,6 +149,80 @@ if (Web::posted()) {
             $store->write('config', $config);
             $store->log('settings.telegram', 'Telegram was removed. Reminders go by email only.');
             Web::flash('Telegram removed. Reminders now go by email only.', 'warn');
+            break;
+
+        case 'twilio_save':
+            $twilio = [
+                'account_sid' => Web::post('account_sid'),
+                'auth_token' => Web::post('auth_token') ?: (string) ($config['twilio']['auth_token'] ?? ''),
+                'from' => (string) Phone::e164(Web::post('from')),
+            ];
+            if (!Twilio::validSid($twilio['account_sid']) || $twilio['auth_token'] === '' || $twilio['from'] === '') {
+                Web::flash('Enter the Account SID (it starts with AC), the auth token, and your Twilio phone number.', 'bad');
+                break;
+            }
+            try {
+                Twilio::check($twilio);
+            } catch (\RuntimeException $e) {
+                Web::flash('Not saved. ' . $e->getMessage(), 'bad');
+                break;
+            }
+            $config['twilio'] = $twilio;
+            $store->write('config', $config);
+            $store->log('settings.twilio', 'Twilio was set up for calls.');
+            Web::flash('Saved. Twilio accepted the account details. Use "Call me" below to hear a test call.');
+            break;
+
+        case 'textbelt_save':
+            $key = Web::post('textbelt_key');
+            try {
+                $quota = Textbelt::quota($key);
+            } catch (\RuntimeException $e) {
+                Web::flash('Not saved. ' . $e->getMessage(), 'bad');
+                break;
+            }
+            if ($quota < 1) {
+                // Textbelt answers the same for a made-up key as for a used-up one.
+                Web::flash('Not saved: Textbelt says that key has no texts. Check it was copied in full, or buy more.', 'bad');
+                break;
+            }
+            $config['textbelt'] =['key' => $key, 'quota' => $quota, 'quota_at' => Clock::now()];
+            $store->write('config', $config);
+            $store->locked(static function () use ($store, $quota): void {
+                $mail = $store->read('mail');
+                $mail['texts_left'] = $quota;
+                $store->write('mail', $mail);
+            });
+            $store->log('settings.textbelt', 'Textbelt was set up for texts.');
+            Web::flash("Saved. The key has {$quota} texts left." . ($quota < 5 ? ' That is not many: buy more before you rely on it.' : ''), $quota < 5 ? 'warn' : 'ok');
+            break;
+
+        case 'phone_test':
+            $to = Phone::e164(Web::post('test_phone'));
+            if ($to === null) {
+                Web::flash('Enter your own mobile number to test with. A US number can be ten digits; any other needs + and the country code.', 'bad');
+                break;
+            }
+            $config['owner_phone'] = Web::post('test_phone');
+            $store->write('config', $config);
+            if (Web::post('how') === 'call') {
+                $ok = Outbox::callReady($config) && $outbox->call($to, Messages::callTest($config), 'you') !== null;
+                $sent = 'A test call is on its way. It should ring within a minute.';
+            } else {
+                $ok = Outbox::textReady($config) && $outbox->text($to, Messages::textTest(), 'you');
+                $sent = 'A test text has been sent.';
+            }
+            $error = $store->read('mail')['phone_error']['error'] ?? 'it is not set up';
+            Web::flash($ok ? $sent : 'The test did not go through. ' . $error, $ok ? 'ok' : 'bad');
+            break;
+
+        case 'twilio_remove':
+        case 'textbelt_remove':
+            $which = Web::post('action') === 'twilio_remove' ? 'twilio' : 'textbelt';
+            unset($config[$which]);
+            $store->write('config', $config);
+            $store->log('settings.' . $which, ($which === 'twilio' ? 'Calls' : 'Texts') . ' were turned off.');
+            Web::flash(($which === 'twilio' ? 'Calls' : 'Texts') . ' turned off. Contacts are still emailed.', 'warn');
             break;
 
         case 'smtp':
@@ -365,6 +439,93 @@ Web::$title = 'Settings: Death Plan Switch';
     <button type="submit">Check the token</button>
   </form>
 </details>
+<?php endif ?>
+
+<h2>Calls and texts to your contacts</h2>
+<?php $twilio = (array) ($config['twilio'] ?? []); $textbelt = (array) ($config['textbelt'] ?? []); ?>
+<p>So your contacts are not relying on email alone. When the switch emails a contact, it can also phone them and text them, if you tick that on their page and they confirm their number. The call and the text only tell them to read their email; your message itself never leaves by phone. Calls use Twilio, texts use Textbelt. Both are pay as you go.</p>
+
+<h3>Calls: Twilio</h3>
+<?php if (Outbox::callReady($config)): ?>
+<dl class="facts">
+  <dt>Account</dt><dd><?= e($twilio['account_sid']) ?></dd>
+  <dt>Calls from</dt><dd><?= e($twilio['from']) ?></dd>
+</dl>
+<?php endif ?>
+<details<?= Outbox::callReady($config) ? '' : ' open' ?>>
+  <summary><?= Outbox::callReady($config) ? 'Change the Twilio details' : 'Set up calls' ?></summary>
+  <ol>
+    <li>Sign up at twilio.com. A trial account can only call numbers you have verified with Twilio, and plays a short trial notice first. Upgrade it (add a little credit) before you rely on it.</li>
+    <li>Buy a phone number with voice. About $1.15 a month; calls cost a cent or two a minute.</li>
+    <li>Copy the Account SID and Auth token from the Twilio Console.</li>
+  </ol>
+  <form method="post" action="index.php?p=settings">
+    <?= Web::csrfField() ?>
+    <input type="hidden" name="action" value="twilio_save">
+    <div class="field">
+      <label for="account_sid">Account SID</label>
+      <input type="text" id="account_sid" name="account_sid" value="<?= e($twilio['account_sid'] ?? '') ?>" maxlength="34" autocomplete="off" spellcheck="false" required>
+    </div>
+    <div class="field">
+      <label for="auth_token">Auth token</label>
+      <input type="password" id="auth_token" name="auth_token" maxlength="64" autocomplete="off"<?= Outbox::callReady($config) ? '' : ' required' ?>>
+<?php if (Outbox::callReady($config)): ?>
+      <span class="help">Leave blank to keep the saved one.</span>
+<?php endif ?>
+    </div>
+    <div class="field">
+      <label for="from">Your Twilio number</label>
+      <input type="tel" id="from" name="from" value="<?= e($twilio['from'] ?? '') ?>" maxlength="20" autocomplete="off" required>
+      <span class="help">With + and the country code, for example +15550100199.</span>
+    </div>
+    <button type="submit">Check and save</button>
+  </form>
+<?php if (Outbox::callReady($config)): ?>
+  <form method="post" action="index.php?p=settings"><?= Web::csrfField() ?><input type="hidden" name="action" value="twilio_remove"><button class="link" type="submit" data-confirm="Turn calls off? Contacts will still be emailed.">Turn calls off</button></form>
+<?php endif ?>
+</details>
+
+<h3>Texts: Textbelt</h3>
+<?php if (Outbox::textReady($config)): ?>
+<dl class="facts">
+  <dt>Texts left</dt><dd><?= (int) ($store->read('mail')['texts_left'] ?? $textbelt['quota'] ?? 0) ?></dd>
+</dl>
+<?php endif ?>
+<details<?= Outbox::textReady($config) ? '' : ' open' ?>>
+  <summary><?= Outbox::textReady($config) ? 'Change the Textbelt key' : 'Set up texts' ?></summary>
+  <p>Buy a key at textbelt.com. There is no monthly fee and no number to register: a small pack of texts lasts for years at this volume. The free key, <code>textbelt</code>, allows one text a day and is only good for a test.</p>
+  <form method="post" action="index.php?p=settings">
+    <?= Web::csrfField() ?>
+    <input type="hidden" name="action" value="textbelt_save">
+    <div class="field">
+      <label for="textbelt_key">API key</label>
+      <input type="text" id="textbelt_key" name="textbelt_key" maxlength="120" autocomplete="off" spellcheck="false" required>
+    </div>
+    <button type="submit">Check and save</button>
+  </form>
+<?php if (Outbox::textReady($config)): ?>
+  <form method="post" action="index.php?p=settings"><?= Web::csrfField() ?><input type="hidden" name="action" value="textbelt_remove"><button class="link" type="submit" data-confirm="Turn texts off? Contacts will still be emailed.">Turn texts off</button></form>
+<?php endif ?>
+</details>
+
+<?php if (Outbox::callReady($config) || Outbox::textReady($config)): ?>
+<h3>Try it on yourself</h3>
+<form method="post" action="index.php?p=settings">
+  <?= Web::csrfField() ?>
+  <input type="hidden" name="action" value="phone_test">
+  <div class="field">
+    <label for="test_phone">Your mobile</label>
+    <input type="tel" id="test_phone" name="test_phone" value="<?= e($config['owner_phone'] ?? '') ?>" maxlength="40" autocomplete="off" required>
+  </div>
+  <div class="actions">
+<?php if (Outbox::callReady($config)): ?>
+    <button class="button-quiet" type="submit" name="how" value="call">Call me</button>
+<?php endif ?>
+<?php if (Outbox::textReady($config)): ?>
+    <button class="button-quiet" type="submit" name="how" value="text">Text me</button>
+<?php endif ?>
+  </div>
+</form>
 <?php endif ?>
 
 <h2>Mail server</h2>

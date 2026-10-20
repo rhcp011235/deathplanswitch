@@ -340,6 +340,73 @@ final class Messages
             ->p("{$owner} will be in touch. You can reply to this email to reach them.");
     }
 
+    // ------------------------------------------------------------------
+    // Texts and calls to contacts
+    //
+    // Short, and never the owner's own message: that goes by email only,
+    // so that it is not left on a lock screen or read out to a voicemail.
+    // ------------------------------------------------------------------
+
+    /**
+     * @param string|null $fineUrl  null for the version without links, sent
+     *                              if the text service refuses links
+     */
+    public static function textVerify(array $config, array $nok, ?string $fineUrl, ?string $wrongUrl): string
+    {
+        $owner = (string) $config['owner_name'];
+        $text = "{$owner} has missed a weekly check-in with Death Plan Switch and has not answered the reminders. Is everything all right?";
+        if ($fineUrl !== null && $wrongUrl !== null) {
+            return $text . "\n\nAll fine: {$fineUrl}\n\nSomething's wrong: {$wrongUrl}";
+        }
+        return $text . " Please answer the email sent to {$nok['email']}.";
+    }
+
+    public static function callVerify(array $config, array $nok): string
+    {
+        $owner = (string) $config['owner_name'];
+        return "Hello {$nok['name']}. This is an automated call from {$owner}'s Death Plan Switch. "
+            . "{$owner} has missed a weekly check-in and has not answered the reminders. "
+            . "Please check your email and your text messages, and answer whether everything is all right.";
+    }
+
+    public static function textFired(array $config, array $contact): string
+    {
+        $owner = (string) $config['owner_name'];
+        return "{$owner} has stopped checking in with Death Plan Switch, and nobody has confirmed they are well. "
+            . "{$owner} left you a message, which has been emailed to {$contact['email']}. Please read it.";
+    }
+
+    public static function callFired(array $config, array $contact): string
+    {
+        $owner = (string) $config['owner_name'];
+        return "Hello {$contact['name']}. This is an automated call from {$owner}'s Death Plan Switch. "
+            . "{$owner} has stopped checking in, and nobody has confirmed they are well. "
+            . "{$owner} left you a message, which has been emailed to you. Please read it.";
+    }
+
+    public static function textAllClear(array $config): string
+    {
+        $owner = (string) $config['owner_name'];
+        return "False alarm: {$owner} has checked in with Death Plan Switch and is fine. You do not need to do anything.";
+    }
+
+    public static function callAllClear(array $config, array $contact): string
+    {
+        $owner = (string) $config['owner_name'];
+        return "Hello {$contact['name']}. This is {$owner}'s Death Plan Switch again. It was a false alarm. "
+            . "{$owner} has checked in and is fine. You do not need to do anything.";
+    }
+
+    public static function textTest(): string
+    {
+        return 'This is a test from your Death Plan Switch. Texts to your contacts will look like this.';
+    }
+
+    public static function callTest(array $config): string
+    {
+        return 'This is a test call from ' . $config['owner_name'] . "'s Death Plan Switch. Calls to your contacts will sound like this.";
+    }
+
     private static function footer(array $config, array $vars): string
     {
         $owner = (string) $config['owner_name'];

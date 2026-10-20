@@ -5,6 +5,9 @@
 - Telegram, as a second way to reach the owner. Check-ins, reminders and notices go there too, with a check-in button.
 - With Telegram set up, the next of kin is not asked until a reminder has reached the owner by both email and Telegram. A failing channel is chased every 6 hours, for up to a week past the usual 72 hours.
 - Telegram failures, and a held escalation, show on every page and on the health address.
+- Calls (Twilio) and texts (Textbelt) to contacts, alongside their emails: to the next of kin when asked and reminded (the text carries the answer links), to every contact when the switch fires, and a false-alarm call or text to anyone reached that way if the owner checks in.
+- Contacts are only phoned at a number they confirmed, on the page where they confirm their email. Calls only go out between 8am and 9pm owner time, are retried 3 times if missed, and are cancelled if the owner checks in first. The owner's message itself never goes by phone.
+- Settings: Twilio and Textbelt setup, with a test call and test text to the owner. A warning when texts are running low.
 
 ## 1.0.0, October 2026
 

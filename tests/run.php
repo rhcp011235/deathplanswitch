@@ -19,6 +19,8 @@ use DPS\Email;
 use DPS\Engine;
 use DPS\Messages;
 use DPS\Messenger;
+use DPS\Caller;
+use DPS\Texter;
 use DPS\Outbox;
 use DPS\Schedule;
 use DPS\Store;
@@ -76,6 +78,53 @@ final class ChatRecorder implements Messenger
     }
 }
 
+/** Records calls and texts instead of making them. Calls are answered unless told otherwise. */
+final class PhoneRecorder implements Texter, Caller
+{
+    /** @var array<int, array{at: int, to: string, body: string}> */
+    public array $texts = [];
+    /** @var array<int, array{at: int, to: string, script: string, id: string}> */
+    public array $calls = [];
+    public bool $textsDown = false;
+    /** @var null|callable(string): bool return true to refuse this text */
+    public $refuse = null;
+    public string $answer = 'answered';
+    public int $left = 100;
+
+    public function text(array $settings, string $to, string $body): ?int
+    {
+        if ($this->textsDown || ($this->refuse !== null && ($this->refuse)($body))) {
+            throw new \RuntimeException('Simulated text failure');
+        }
+        $this->texts[] = ['at' => Clock::now(), 'to' => $to, 'body' => $body];
+        return --$this->left;
+    }
+
+    public function call(array $settings, string $to, string $script): string
+    {
+        $id = 'CA' . bin2hex(random_bytes(16));
+        $this->calls[] = ['at' => Clock::now(), 'to' => $to, 'script' => $script, 'id' => $id];
+        return $id;
+    }
+
+    public function status(array $settings, string $id): string
+    {
+        return $this->answer;
+    }
+
+    /** @return array<int, array> */
+    public function textsTo(string $to): array
+    {
+        return array_values(array_filter($this->texts, static fn (array $t): bool => $t['to'] === $to));
+    }
+
+    /** @return array<int, array> */
+    public function callsTo(string $to): array
+    {
+        return array_values(array_filter($this->calls, static fn (array $c): bool => $c['to'] === $to));
+    }
+}
+
 /** One throwaway install. */
 final class World
 {
@@ -83,6 +132,7 @@ final class World
     public Store $store;
     public Recorder $mail;
     public ChatRecorder $chat;
+    public PhoneRecorder $phones;
     public Engine $engine;
     public string $probe = 'protected';
 
@@ -101,9 +151,10 @@ final class World
         $this->store = new Store($this->dir);
         $this->mail = new Recorder();
         $this->chat = new ChatRecorder();
+        $this->phones = new PhoneRecorder();
         $this->engine = new Engine(
             $this->store,
-            new Outbox($this->store, $this->mail, $this->chat),
+            new Outbox($this->store, $this->mail, $this->chat, $this->phones, $this->phones),
             fn (): array => ['result' => $this->probe, 'detail' => 'test', 'checked_at' => Clock::now()]
         );
         $this->store->write('config', [
@@ -165,6 +216,28 @@ final class World
         $config = $this->store->read('config');
         $config['telegram'] = ['bot_token' => '123456789:' . str_repeat('A', 35), 'bot_name' => 'sam_switch_bot', 'chat_id' => '4242', 'linked_at' => Clock::now()];
         $this->store->write('config', $config);
+        return $this;
+    }
+
+    public const NOK_PHONE = '+15550100101';
+    public const TECH_PHONE = '+15550100102';
+
+    /** Set up Twilio and Textbelt, and give the next of kin and the technical contact confirmed numbers. */
+    public function withPhones(bool $confirmed = true): self
+    {
+        $config = $this->store->read('config');
+        $config['twilio'] = ['account_sid' => 'AC' . str_repeat('0', 32), 'auth_token' => 'secret', 'from' => '+15550100100'];
+        $config['textbelt'] = ['key' => 'test-key', 'quota' => 100];
+        $this->store->write('config', $config);
+        foreach ($this->engine->contacts()->all() as $contact) {
+            $number = ['nok' => self::NOK_PHONE, 'technical' => self::TECH_PHONE][$contact['kind']] ?? null;
+            if ($number !== null) {
+                $contact['phone'] = '(555) 010-0' . substr($number, -3);
+                $contact['call'] = $contact['text'] = true;
+                $contact['phone_confirmed'] = $confirmed ? $number : null;
+                $this->engine->contacts()->save($contact);
+            }
+        }
         return $this;
     }
 
@@ -1115,6 +1188,183 @@ test('Telegram messages carry the same words as the email', function (): void {
     $email = $w->to(World::OWNER, 'Check in with')[0];
     $chat = $w->chat->titled('Check in with')[0];
     same($email['subject'] . "\n\n" . trim($email['text']), $chat['text'], 'same text');
+});
+
+// ---------------------------------------------------------------------------
+// Calls and texts to contacts
+// ---------------------------------------------------------------------------
+
+test('the next of kin is texted the answer links and called when they are asked', function (): void {
+    $w = World::armed()->withPhones();
+    $w->until('2026-10-12 09:00');
+    $w->hours(71);
+    same([], $w->phones->texts, 'no texts before 72 hours');
+    $w->hours(1);
+    $texts = $w->phones->textsTo(World::NOK_PHONE);
+    same(1, count($texts), 'the next of kin is texted');
+    check(preg_match('~respond\.php\?t=([A-Za-z0-9_-]+)&a=fine~', $texts[0]['body'], $m) === 1, 'with the "All fine" link');
+    check(str_contains($texts[0]['body'], 'a=wrong'), 'and the "Something\'s wrong" link');
+    same(1, count($w->phones->callsTo(World::NOK_PHONE)), 'and called in the same run');
+    check(str_contains($w->phones->calls[0]['script'], 'Sam Rivers has missed a weekly check-in'), 'the call says why');
+    same([], $w->phones->textsTo(World::TECH_PHONE), 'nobody else is phoned yet');
+
+    same('fine', $w->engine->nokAnswer($m[1], 'fine'), 'the link in the text answers the question');
+    $w->hours(24 * 5);
+    same(1, count($w->phones->calls), 'an answered call is not repeated');
+});
+
+test('when the switch fires, contacts are texted and called, but never sent their message by phone', function (): void {
+    $w = World::armed()->withPhones();
+    $w->until('2026-10-12 09:00');
+    $w->hours(144);
+    $tech = $w->phones->textsTo(World::TECH_PHONE);
+    same(1, count($tech), 'the technical contact is texted');
+    check(str_contains($tech[0]['body'], World::TECH), 'telling them where their message went');
+    same(1, count($w->phones->callsTo(World::TECH_PHONE)), 'and called');
+    foreach (array_merge(array_column($w->phones->texts, 'body'), array_column($w->phones->calls, 'script')) as $said) {
+        check(!str_contains($said, 'blue folder'), 'the owner\'s message never goes by phone');
+    }
+    same(3, count($w->phones->textsTo(World::NOK_PHONE)), 'the next of kin: asked, reminded, then fired');
+});
+
+test('a number the contact has not confirmed is never called or texted', function (): void {
+    $w = World::armed()->withPhones(false);
+    $w->until('2026-10-12 09:00');
+    $w->hours(150);
+    same([], $w->phones->texts, 'no texts');
+    same([], $w->phones->calls, 'no calls');
+    check(count(array_filter($w->engine->warnings(), static fn (array $x): bool => str_contains($x['text'], 'not confirmed their phone number'))) === 2, 'the owner is warned for each');
+});
+
+test('confirming as a contact confirms the number shown with it', function (): void {
+    $w = World::armed();
+    $kim = $w->engine->contacts()->nok();
+    $kim['phone'] = '555-010-0101';
+    $kim['call'] = true;
+    $w->engine->contacts()->save($kim);
+    check(Contacts::phoneUnconfirmed($w->engine->contacts()->nok()), 'not yet confirmed');
+    check($w->engine->sendConfirmation($kim['id'], 'reconfirm'), 'asked');
+    check($w->engine->contactAnswer($w->token(World::NOK, 'confirm.php'), true) !== null, 'confirmed');
+    same(World::NOK_PHONE, Contacts::phoneTo($w->engine->contacts()->nok()), 'the number is now usable');
+
+    $kim = $w->engine->contacts()->nok();
+    $kim['phone'] = '555-010-0999';
+    $w->engine->contacts()->save($kim);
+    same(null, Contacts::phoneTo($w->engine->contacts()->nok()), 'changing the number needs a new confirmation');
+});
+
+test('calls wait for the morning; texts do not', function (): void {
+    $w = World::armed();
+    $config = $w->store->read('config');
+    $config['slot_hour'] = 22;
+    $w->store->write('config', $config);
+    $w->engine->checkIn('test'); // pick up the new slot
+    $w->withPhones();
+    $w->until('2026-10-12 22:00');
+    $w->hours(72);
+    same(1, count($w->phones->textsTo(World::NOK_PHONE)), 'texted at 10pm');
+    same([], $w->phones->calls, 'but not called');
+    $w->until('2026-10-16 07:00');
+    same([], $w->phones->calls, 'not through the night');
+    $w->until('2026-10-16 08:00');
+    same(1, count($w->phones->calls), 'called at 8am');
+});
+
+test('checking in cancels a call not yet made, and false-alarm notices go the same way', function (): void {
+    $w = World::armed();
+    $config = $w->store->read('config');
+    $config['slot_hour'] = 22;
+    $w->store->write('config', $config);
+    $w->engine->checkIn('test');
+    $w->withPhones();
+    $w->until('2026-10-12 22:00');
+    $w->hours(72); // the next of kin is texted; the call waits for 8am
+    $w->engine->checkIn('the dashboard');
+    $w->until('2026-10-16 12:00');
+    same([], $w->phones->calls, 'the waiting call was never made');
+    $texts = $w->phones->textsTo(World::NOK_PHONE);
+    same(2, count($texts), 'the next of kin was texted twice');
+    check(str_starts_with($texts[1]['body'], 'False alarm'), 'the second is the false alarm');
+});
+
+test('after the switch fires, checking in calls and texts everyone who was called and texted', function (): void {
+    $w = World::armed()->withPhones();
+    $w->until('2026-10-12 09:00');
+    $w->hours(144);
+    $calls = count($w->phones->callsTo(World::TECH_PHONE));
+    $w->engine->checkIn('the dashboard');
+    $w->hours(1);
+    $texts = $w->phones->textsTo(World::TECH_PHONE);
+    check(str_starts_with(end($texts)['body'], 'False alarm'), 'texted the false alarm');
+    same($calls + 1, count($w->phones->callsTo(World::TECH_PHONE)), 'and called with it');
+    check(str_contains(end($w->phones->calls)['script'], 'false alarm'), 'saying so');
+});
+
+test('a text with links that is refused is sent again without them', function (): void {
+    $w = World::armed()->withPhones();
+    $w->phones->refuse = static fn (string $body): bool => str_contains($body, 'https://');
+    $w->until('2026-10-12 09:00');
+    $w->hours(72);
+    $texts = $w->phones->textsTo(World::NOK_PHONE);
+    same(1, count($texts), 'one text went');
+    check(!str_contains($texts[0]['body'], 'https://'), 'without links');
+    check(str_contains($texts[0]['body'], World::NOK), 'pointing to their email instead');
+});
+
+test('a missed call is tried three times, half an hour apart', function (): void {
+    $w = World::armed()->withPhones();
+    $w->phones->answer = 'missed';
+    $w->until('2026-10-12 09:00');
+    $w->hours(72);
+    for ($i = 0; $i < 12; $i++) {
+        Clock::advance(15 * 60);
+        $w->engine->tick();
+    }
+    $calls = $w->phones->callsTo(World::NOK_PHONE);
+    same(3, count($calls), 'three tries, then no more');
+    check($calls[1]['at'] - $calls[0]['at'] >= Schedule::CALL_RETRY, 'spaced out');
+    check(in_array('phone', $w->engine->health()['problems'], true), 'the owner is told calls are not getting through');
+});
+
+test('a failed text is retried, without links, and the health check says so', function (): void {
+    $w = World::armed()->withPhones();
+    $w->phones->textsDown = true;
+    $w->until('2026-10-12 09:00');
+    $w->hours(72);
+    same([], $w->phones->texts, 'no text got through');
+    check(in_array('phone', $w->engine->health()['problems'], true), 'reported');
+    check(!str_contains(file_get_contents($w->store->path('state')), 'respond.php'), 'the queued retry holds no usable link');
+    $w->phones->textsDown = false;
+    $w->hours(1);
+    same(1, count($w->phones->textsTo(World::NOK_PHONE)), 'the retry goes through');
+    check(!in_array('phone', $w->engine->health()['problems'], true), 'and the fault clears');
+});
+
+test('the owner is warned when texts are running out', function (): void {
+    $w = World::armed()->withPhones();
+    $w->phones->left = 6;
+    $w->until('2026-10-12 09:00');
+    $w->hours(72);
+    check(count(array_filter($w->engine->warnings(), static fn (array $x): bool => $x['key'] === 'texts')) === 1, 'warned');
+});
+
+test('without calls and texts set up, nothing is phoned even if ticked', function (): void {
+    $w = World::armed()->withPhones();
+    $config = $w->store->read('config');
+    unset($config['twilio'], $config['textbelt']);
+    $w->store->write('config', $config);
+    $w->until('2026-10-12 09:00');
+    $w->hours(150);
+    same([], $w->phones->texts, 'no texts');
+    same([], $w->phones->calls, 'no calls');
+});
+
+test('phone numbers are put in international form', function (): void {
+    same('+15550100101', \DPS\Phone::e164('(555) 010-0101'), 'ten US digits');
+    same('+15550100101', \DPS\Phone::e164('1 555 010 0101'), 'with the leading 1');
+    same('+61412345678', \DPS\Phone::e164('+61 412 345 678'), 'another country, with +');
+    same(null, \DPS\Phone::e164('0412 345 678'), 'a local number without a country code is refused');
+    same(null, \DPS\Phone::e164('12345'), 'too short');
 });
 
 // ---------------------------------------------------------------------------
