@@ -62,8 +62,8 @@ if (Web::posted()) {
         Web::redirect('index.php?p=contacts');
     }
 
-    if ($action === 'send' && !$isNew) {
-        if ($engine->sendConfirmation($contact['id'])) {
+    if (($action === 'send' || $action === 'confirm_phone') && !$isNew) {
+        if ($engine->sendConfirmation($contact['id'], $action === 'confirm_phone' ? 'reconfirm' : null)) {
             Web::flash('Confirmation email sent to ' . ($contact['pending_email'] ?: $contact['email']) . '.');
         } else {
             Web::flash('The confirmation email could not be sent. Check the mail settings.', 'bad');
@@ -95,9 +95,15 @@ if (Web::posted()) {
     if (in_array($email, array_map('strtolower', $engine->ownerAddresses($config)), true)) {
         $errors[] = 'That is one of your own addresses. A contact has to be someone else.';
     }
+    $wantsPhone = isset($_POST['call']) || isset($_POST['text']);
+    if ($wantsPhone && Phone::e164(Web::post('phone')) === null) {
+        $errors[] = 'To call or text them, enter a phone number. A US number can be ten digits; any other needs + and the country code.';
+    }
 
     $contact['name'] = $name;
     $contact['phone'] = Web::post('phone');
+    $contact['call'] = isset($_POST['call']);
+    $contact['text'] = isset($_POST['text']);
     $contact['role_label'] = Web::post('role_label') ?: Contacts::KINDS[$kind];
     $contact['message'] = ['subject' => $subject, 'body' => $body];
     if ($kind === 'nok') {
@@ -142,6 +148,10 @@ if (Web::posted()) {
 
         $notes = ['Saved.'];
         $level = 'ok';
+        if (!$sendNow && $contact['status'] === 'confirmed' && Contacts::phoneUnconfirmed($contact)) {
+            $notes[] = "{$contact['name']} has not confirmed this phone number, so they will not be called or texted until they do. Use the button at the top of this page to ask them.";
+            $level = 'warn';
+        }
         if ($sendNow) {
             if ($engine->sendConfirmation($contact['id'])) {
                 $notes[] = 'A confirmation email has gone to ' . $email . '.';
@@ -191,6 +201,10 @@ Web::$title = ($isNew ? 'Add a contact' : $contact['name']) . ': Death Plan Swit
   <p>Waiting for them to confirm <strong><?= e($contact['pending_email']) ?></strong>. Until they do, the switch keeps using <?= e($contact['email']) ?>.</p>
   <form method="post" action="<?= e($self) ?>"><?= Web::csrfField() ?><input type="hidden" name="action" value="send"><button class="button-quiet" type="submit">Send the confirmation email again</button></form>
 <?php endif ?>
+<?php if (Contacts::phoneUnconfirmed($contact) && Phone::e164((string) $contact['phone']) !== null): ?>
+  <p><span class="tag tag-warn">Number not confirmed.</span> <?= e($contact['name']) ?> confirmed before <?= e($contact['phone']) ?> was their number here, so they will not be called or texted on it yet. They get an email with a link; confirming there confirms the number too.</p>
+  <form method="post" action="<?= e($self) ?>"><?= Web::csrfField() ?><input type="hidden" name="action" value="confirm_phone"><button class="button-quiet" type="submit">Ask them to confirm this number</button></form>
+<?php endif ?>
 <?php elseif ($contact['status'] === 'declined'): ?>
   <p><span class="tag tag-bad">Declined.</span> <?= e($contact['name']) ?> asked not to be a contact and will not be written to. If that was a mistake, speak to them, then send a new request.</p>
   <form method="post" action="<?= e($self) ?>"><?= Web::csrfField() ?><input type="hidden" name="action" value="send"><button class="button-quiet" type="submit">Send a new confirmation email</button></form>
@@ -221,8 +235,20 @@ Web::$title = ($isNew ? 'Add a contact' : $contact['name']) . ': Death Plan Swit
   <div class="field">
     <label for="phone">Phone <span class="muted">(optional)</span></label>
     <input type="tel" id="phone" name="phone" value="<?= e($contact['phone']) ?>" maxlength="40" autocomplete="off">
-    <span class="help">Never called or texted by the switch. It is shown to your other contacts so they can reach each other.</span>
+    <span class="help">Shown to your other contacts so they can reach each other. A US number can be ten digits; any other needs + and the country code.</span>
   </div>
+<?php $phoneConfig = $engine->config(); ?>
+  <div class="tick">
+    <input type="checkbox" id="call" name="call" value="1"<?= !empty($contact['call']) ? ' checked' : '' ?>>
+    <label for="call">Phone them as well as emailing</label>
+    <span class="help">A computer voice tells them to check their email: when <?= $kind === 'nok' ? 'they are asked if you are all right, when they are reminded, ' : '' ?>when the switch fires, and if it turns out to be a false alarm. Only between <?= e(hourLabel(Schedule::CALL_FROM_HOUR)) ?> and <?= e(hourLabel(Schedule::CALL_UNTIL_HOUR)) ?> your time; a missed call is tried <?= Schedule::CALL_ATTEMPTS ?> times.<?= Outbox::callReady($phoneConfig) ? '' : ' <strong>Calls are not set up yet: see Settings.</strong>' ?></span>
+  </div>
+  <div class="tick">
+    <input type="checkbox" id="text" name="text" value="1"<?= !empty($contact['text']) ? ' checked' : '' ?>>
+    <label for="text">Text them as well as emailing</label>
+    <span class="help">At the same moments, at any hour.<?= $kind === 'nok' ? ' The text carries the "All fine" and "Something\'s wrong" links.' : '' ?> Your message itself only ever goes by email.<?= Outbox::textReady($phoneConfig) ? '' : ' <strong>Texts are not set up yet: see Settings.</strong>' ?></span>
+  </div>
+  <p class="small muted">They are only called or texted once they have confirmed the number, on the same page where they confirm their email.</p>
   <div class="field">
     <label for="role_label">Role</label>
     <input type="text" id="role_label" name="role_label" value="<?= e($contact['role_label']) ?>" maxlength="60" autocomplete="off">

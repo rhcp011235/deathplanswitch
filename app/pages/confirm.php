@@ -44,7 +44,11 @@ Web::$title = 'Death Plan Switch';
 <?php else: ?>
 <p>If <?= e($owner) ?> stops checking in and their next of kin cannot confirm they are well, you would get one email telling you what <?= e($owner) ?> needs you to do.</p>
 <?php endif ?>
+<?php $phone = Phone::e164((string) ($contact['phone'] ?? '')); ?>
 <p>Confirming tells <?= e($owner) ?> that <strong><?= e($purpose === 'email_change' ? (string) $contact['pending_email'] : (string) $contact['email']) ?></strong> reaches you, and that you are willing.</p>
+<?php if ($phone !== null): ?>
+<p>It also lets the switch phone or text you at <strong><?= e($contact['phone']) ?></strong> at those moments, as well as emailing. Calls are made only between <?= e(hourLabel(Schedule::CALL_FROM_HOUR)) ?> and <?= e(hourLabel(Schedule::CALL_UNTIL_HOUR)) ?>, <?= e($owner) ?>'s time. If that is not your number, choose "No" and tell <?= e($owner) ?>.</p>
+<?php endif ?>
 <form method="post" action="confirm.php">
   <input type="hidden" name="t" value="<?= e($token) ?>">
   <div class="actions">

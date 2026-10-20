@@ -76,6 +76,9 @@ final class Contacts
             'email' => '',
             'phone' => '',
             'pending_email' => null,
+            'call' => false,                // phone them as well as email, once their number is confirmed
+            'text' => false,
+            'phone_confirmed' => null,      // the number, in +E.164 form, as it was when they confirmed
             'status' => 'unconfirmed',      // unconfirmed | confirmed | declined
             'token' => null,                // {hash, expires_at, purpose}
             'confirm_sent_at' => null,
@@ -135,6 +138,22 @@ final class Contacts
             }
         }
         return null;
+    }
+
+    /**
+     * The number the switch may call or text, or null if it may not: there is
+     * no valid number, or it is not the one the contact confirmed.
+     */
+    public static function phoneTo(array $contact): ?string
+    {
+        $number = Phone::e164((string) ($contact['phone'] ?? ''));
+        return $number !== null && $number === ($contact['phone_confirmed'] ?? null) ? $number : null;
+    }
+
+    /** Has the owner asked for calls or texts to a number the contact has not confirmed? */
+    public static function phoneUnconfirmed(array $contact): bool
+    {
+        return (!empty($contact['call']) || !empty($contact['text'])) && self::phoneTo($contact) === null;
     }
 
     /** The role label as it reads mid-sentence: "next of kin", "technical 2IC", or whatever the owner typed. */

@@ -62,7 +62,7 @@ function engine(): Engine
     static $engine = null;
     if ($engine === null) {
         $store = store();
-        $engine = new Engine($store, new Outbox($store, new SmtpTransport(), new Telegram()));
+        $engine = new Engine($store, new Outbox($store, new SmtpTransport(), new Telegram(), new Textbelt(), new Twilio()));
     }
     return $engine;
 }

@@ -16,8 +16,25 @@ final class Outbox
 {
     public const CHANNELS = ['email', 'telegram'];
 
-    public function __construct(private Store $store, private Transport $transport, private ?Messenger $telegram = null)
+    public function __construct(
+        private Store $store,
+        private Transport $transport,
+        private ?Messenger $telegram = null,
+        private ?Texter $texter = null,
+        private ?Caller $caller = null,
+    ) {
+    }
+
+    /** Is a text service set up? */
+    public static function textReady(array $config): bool
     {
+        return !empty($config['textbelt']['key']);
+    }
+
+    /** Is a call service set up? */
+    public static function callReady(array $config): bool
+    {
+        return !empty($config['twilio']['account_sid']) && !empty($config['twilio']['auth_token']) && !empty($config['twilio']['from']);
     }
 
     /** Is Telegram set up and linked to the owner's chat? */
@@ -137,6 +154,94 @@ final class Outbox
             ($ok ? 'Sent' : 'Could not send') . ' "' . $subject . '" to ' . implode(', ', $to)
                 . ($ok ? '' : '. ' . mb_substr($error, 0, 300))
         );
+    }
+
+    /**
+     * Send a text. If $fallback is given and the text is refused, it is tried
+     * instead: texts with links in them are the ones a service may refuse.
+     *
+     * @param string $who for the history, e.g. "Kim Rivers"
+     */
+    public function text(string $to, string $body, string $who, ?string $fallback = null, ?array $settings = null): bool
+    {
+        $settings ??= (array) ($this->store->read('config')['textbelt'] ?? []);
+        if ($this->texter === null) {
+            return false;
+        }
+        $error = '';
+        foreach (array_filter([$body, $fallback]) as $attempt) {
+            try {
+                $left = $this->texter->text($settings, $to, $attempt);
+                $this->recordPhone(true, "Texted {$who} at " . Phone::masked($to), '', $left);
+                return true;
+            } catch (\Throwable $e) {
+                $error = $e->getMessage();
+            }
+        }
+        $this->recordPhone(false, "Could not text {$who} at " . Phone::masked($to), $error);
+        return false;
+    }
+
+    /**
+     * Start a call. Whether it was answered is known later, from callStatus().
+     *
+     * @return string|null the call's id, or null if it could not be placed
+     */
+    public function call(string $to, string $script, string $who, ?array $settings = null): ?string
+    {
+        $settings ??= (array) ($this->store->read('config')['twilio'] ?? []);
+        if ($this->caller === null) {
+            return null;
+        }
+        try {
+            $id = $this->caller->call($settings, $to, $script);
+            $this->store->log('phone.called', "Calling {$who} at " . Phone::masked($to) . '.');
+            return $id;
+        } catch (\Throwable $e) {
+            $this->recordPhone(false, "Could not call {$who} at " . Phone::masked($to), $e->getMessage());
+            return null;
+        }
+    }
+
+    /** @return string 'pending', 'answered' or 'missed' */
+    public function callStatus(string $id, string $to, string $who): string
+    {
+        if ($this->caller === null) {
+            return 'missed';
+        }
+        try {
+            $status = $this->caller->status((array) ($this->store->read('config')['twilio'] ?? []), $id);
+        } catch (\Throwable) {
+            return 'pending'; // asked again on the next run
+        }
+        if ($status === 'answered') {
+            $this->recordPhone(true, "The call to {$who} at " . Phone::masked($to) . ' was answered', '');
+        } elseif ($status === 'missed') {
+            $this->recordPhone(false, "The call to {$who} at " . Phone::masked($to) . ' was not answered', 'busy, no answer or failed');
+        }
+        return $status;
+    }
+
+    private function recordPhone(bool $ok, string $what, string $error, ?int $textsLeft = null): void
+    {
+        try {
+            $this->store->locked(function () use ($ok, $what, $error, $textsLeft): void {
+                $state = $this->store->read('mail');
+                if ($textsLeft !== null) {
+                    $state['texts_left'] = $textsLeft;
+                }
+                if ($ok) {
+                    $state['phone_ok_at'] = Clock::now();
+                    $state['phone_error'] = null;
+                } else {
+                    $state['phone_error'] = ['at' => Clock::now(), 'error' => $what . ': ' . mb_substr($error, 0, 400)];
+                }
+                $this->store->write('mail', $state);
+            });
+        } catch (\Throwable) {
+            // Recording is best effort; the caller still gets the true result.
+        }
+        $this->store->log($ok ? 'phone.sent' : 'phone.failed', $what . ($ok ? '.' : '. ' . mb_substr($error, 0, 300)));
     }
 
     private function recordTelegram(bool $ok, string $subject, string $error): void

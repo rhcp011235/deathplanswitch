@@ -59,6 +59,23 @@ final class Schedule
      */
     public const CHANNEL_HOLD = 7 * self::DAY;
 
+    /**
+     * Calls to contacts are placed only between these hours, by the owner's
+     * clock; a call that falls due at night waits for the morning. Texts go
+     * at any hour.
+     */
+    public const CALL_FROM_HOUR = 8;
+    public const CALL_UNTIL_HOUR = 21;
+
+    /** A call that is not answered is tried this many times in all... */
+    public const CALL_ATTEMPTS = 3;
+
+    /** ...this far apart. Texts that fail are retried on the same terms. */
+    public const CALL_RETRY = 30 * 60;
+
+    /** Warn when the text service has fewer than this many texts left. */
+    public const TEXTS_LOW = 10;
+
     /** Check-in links stop working after this long. */
     public const CHECKIN_TOKEN_TTL = 14 * self::DAY;
 

@@ -10,7 +10,7 @@ It is one PHP app with no database. It holds no documents and no passwords. It i
 
 ## This fork
 
-This is a personal fork, set up for one person who lives alone and whose first concern is **false alarms**: family or lawyers being told by mistake. The original only uses email. This fork adds a second channel for the owner, and makes the switch prove it has reached the owner before anyone else hears.
+This is a personal fork, set up for one person who lives alone and whose first concern is **false alarms**: family or lawyers being told by mistake. The original only uses email. This fork adds a second channel for the owner, and makes the switch prove it has reached the owner before anyone else hears. It also lets the switch phone and text family, so they are not relying on email alone.
 
 ### What changed from the original
 
@@ -19,7 +19,9 @@ This is a personal fork, set up for one person who lives alone and whose first c
 - **A failing channel is chased.** If either channel is failing at the 72-hour mark, the switch holds and retries that channel every 6 hours. Once a chase gets through, the owner has 6 hours to check in before the next of kin is asked.
 - **The hold has a limit.** A week past the usual 72 hours, the next of kin is asked anyway, so a broken bot cannot stop the switch from ever working. Being asked is not firing: the next of kin can still answer **All fine**. The limit is `CHANNEL_HOLD` in `app/Schedule.php`.
 - **Faults are loud.** A failed Telegram message or a held escalation shows on every page and turns the health address to `503`.
-- **Contacts are unchanged.** Family, the technical contact and the lawyer are still written to by email only.
+- **Calls and texts to contacts.** Any contact can also be phoned (Twilio) and texted (Textbelt) whenever they are emailed. The call and the text only tell them to read their email, never the message itself. See [Calls and texts](#calls-and-texts).
+- **No wrong numbers.** A contact is only ever phoned at a number they confirmed themselves, on the same page where they confirm their email.
+- **No night calls, no ghost calls.** Calls go out between 8am and 9pm owner time. A call still waiting when the owner checks in is cancelled. Anyone who was called or texted gets the "false alarm" message the same way.
 
 ### How this install is meant to be set up
 
@@ -28,12 +30,19 @@ This is a personal fork, set up for one person who lives alone and whose first c
    - **iCloud:** `smtp.mail.me.com`, port 587, TLS. Make an **app-specific password** at account.apple.com. The From address must be your iCloud address.
 2. **Add a backup email in Settings, at a different provider** (for example Gmail as the main address, iCloud as the backup). Reminders go to both.
 3. **Link Telegram in Settings** (about 2 minutes, see [Telegram](#telegram)), then press **Send a test message**.
-4. **Point a free uptime monitor at the health address.** The health address is how you are told the switch itself is broken.
-5. **Rehearse a full escalation** with `tests/timeshift.php`, using addresses you control, before trusting it.
+4. **Set up calls and texts in Settings:** a Twilio account and number for calls, a Textbelt key for texts. Press **Call me** and **Text me** to hear and see what family will get.
+5. **Tick "Phone them" and "Text them" for family on their contact pages.** Send the confirmation again, so they confirm their number.
+6. **Point a free uptime monitor at the health address.** The health address is how you are told the switch itself is broken.
+7. **Rehearse a full escalation** with `tests/timeshift.php`, using addresses you control, before trusting it.
 
-### Planned
+### What it costs
 
-- **SMS or a phone call to family**, so they are not relying on email alone. Not built yet.
+| Service | For | Cost |
+|---|---|---|
+| Gmail or iCloud | Email | Free |
+| Telegram | You | Free |
+| Twilio | Calls to family | About $1.15 a month for the number, plus a cent or two a minute per call |
+| Textbelt | Texts to family | A one-off pack of texts, no monthly fee. The free key allows one text a day, so it is only good for testing. |
 
 ## How it works
 
@@ -60,7 +69,7 @@ Read this part before relying on it.
 
 - **It is a notification tool, not a guarantee.** It sends emails. It cannot know why you stopped checking in, cannot make anyone act, and cannot work if its server, its scheduler or its mail service is down. The sections below on separate hosting and on monitoring exist because of this.
 - **It stores no documents and no passwords.** Messages say where things are and who to call. Keep the documents themselves with people: a lawyer, your next of kin, your backup developer.
-- **It is email, plus Telegram for you if you want it.** Contacts are written to by email only. No SMS, no phone calls, no app.
+- **It is email first.** Telegram for you, and calls and texts for contacts, are extras on top. Your messages to contacts only ever go by email. There is no app.
 - **It is for one person.** One install, one owner. There are no accounts and no hosted version.
 - **It comes with no warranty** and best-effort support. See [Support](#support).
 
@@ -148,7 +157,7 @@ php tests/timeshift.php 24 --run     # the switch fires
 
 Run them as the user the web pages run as, for example `sudo -u www-data php tests/timeshift.php 24 --run`.
 
-Real emails go to your real contacts, so rehearse with addresses you control, or warn people first. Then check in, and watch the false-alarm notices go out.
+Real emails, calls and texts go to your real contacts, so rehearse with addresses and numbers you control, or warn people first. Then check in, and watch the false-alarm notices go out.
 
 The `tests` folder is left out of release downloads. Get it from the repository. Delete it from your server when you have finished.
 
@@ -164,6 +173,32 @@ Optional, free, and recommended. Email can fail quietly: a filter, a full mailbo
 
 The bot only sends. Nothing has to reach your server from Telegram, so it works behind any firewall. The bot token is stored in the data folder, like your mail password.
 
+## Calls and texts
+
+Optional. Email is easy to miss, and a phone ringing is not. When the switch emails a contact, it can also phone them and text them.
+
+**When.** Each contact who has calls or texts turned on is phoned:
+- **Next of kin:** when they are asked if you are all right, and when they are reminded. The text carries the same **All fine** and **Something's wrong** links as the email.
+- **Every contact:** when the switch fires.
+- **False alarms:** anyone who was called or texted, if you then check in. A call that has not been made yet is simply cancelled.
+
+**What they hear.** A short text, or a computer voice that reads its message twice, telling them to read their email. If voicemail answers, the call waits for the beep so the whole message is left. **Your message itself only ever goes by email.** It is never left on a lock screen or read out to a voicemail.
+
+**Safeguards.**
+- **Confirmed numbers only.** A contact must confirm their number before it is ever used, on the same page where they confirm their email. If you change a number, the new one has to be confirmed again. There is a button for that on the contact's page.
+- **Calls only between 8am and 9pm, your time.** A call that falls due at night waits for the morning. Texts go at any hour.
+- **Retries.** A call that is not answered (busy, no answer, failed) is tried 3 times, half an hour apart. A text that fails is retried the same way.
+- **Links fall back.** If the text service refuses a text because it contains links, the text is resent without them, pointing the reader to their email instead.
+- **Never instead of email.** Calls and texts never hold up the escalation and never replace an email.
+- **Faults are loud.** A call or text that does not get through shows on every page and turns the health address to `503`. You are warned when fewer than 10 texts are left.
+
+**Set up (Settings → Calls and texts).**
+- **Calls, Twilio:** sign up at twilio.com and buy a phone number with voice. Copy your Account SID and Auth token into Settings. A trial account can only call numbers you have verified with Twilio, and plays a trial notice first, so add a little credit before you rely on it. US calls do not need the carrier registration that business texts need.
+- **Texts, Textbelt:** buy a key at textbelt.com and paste it in. There is no phone number to rent and no carrier registration.
+- Then press **Call me** and **Text me** to try both on your own phone.
+
+Numbers can be typed as ten digits for the US and Canada. Any other country needs `+` and the country code. Nothing has to reach your server from Twilio or Textbelt.
+
 ## Day to day
 
 - **Check in** from the weekly email, or by signing in and pressing **Check in now**.
@@ -178,7 +213,7 @@ The bot only sends. Nothing has to reach your server from Telegram, so it works 
 - Files are written to a temporary name and renamed into place, under a lock, so a crash cannot leave one half-written. The previous good copy of each is kept as `.bak`.
 - **If a data file is damaged,** the app uses the `.bak` copy and shows a warning. If both are unreadable it stops and says so, on every page, on the health address and in cron's error output. It never treats damage as a fresh install.
 - Links in emails are stored only as hashes. Someone who reads the data folder cannot use them.
-- Your SMTP password and the text of your messages are stored as plain text in the data folder. That is why the folder matters, and why messages should hold pointers and never logins.
+- Your SMTP password, your Telegram bot token, your Twilio auth token, your Textbelt key and the text of your messages are stored as plain text in the data folder. That is why the folder matters, and why messages should hold pointers and never logins.
 
 ## Updating
 

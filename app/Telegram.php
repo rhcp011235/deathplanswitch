@@ -81,37 +81,11 @@ final class Telegram implements Messenger
         if (!self::validToken($token)) {
             throw new \RuntimeException('The bot token is missing or not in the right form.');
         }
-        $url = self::API . $token . '/' . $method;
-        $body = json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-
-        if (function_exists('curl_init')) {
-            $ch = curl_init($url);
-            curl_setopt_array($ch, [
-                CURLOPT_POST => true,
-                CURLOPT_POSTFIELDS => $body,
-                CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_TIMEOUT => 20,
-            ]);
-            $raw = curl_exec($ch);
-            $error = curl_error($ch);
-        } else {
-            $context = stream_context_create(['http' => [
-                'method' => 'POST',
-                'header' => "Content-Type: application/json\r\n",
-                'content' => $body,
-                'timeout' => 20,
-                'ignore_errors' => true, // Telegram explains its errors in the body
-            ]]);
-            $raw = @file_get_contents($url, false, $context);
-            $error = $raw === false ? 'the request failed' : '';
+        $reply = Http::request(self::API . $token . '/' . $method, json: json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        if ($reply['status'] === 0) {
+            throw new \RuntimeException('Telegram could not be reached: ' . str_replace($token, '…', $reply['error']) . '.');
         }
-
-        if (!is_string($raw) || $raw === '') {
-            throw new \RuntimeException('Telegram could not be reached: ' . str_replace($token, '…', $error ?: 'no response') . '.');
-        }
-        $reply = json_decode($raw, true);
+        $reply = $reply['body'];
         if (!is_array($reply)) {
             throw new \RuntimeException('Telegram sent back something unexpected.');
         }
