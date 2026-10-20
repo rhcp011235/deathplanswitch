@@ -26,6 +26,11 @@ namespace DPS;
  * and steps are never skipped or bunched together. So a broken mail server
  * or a stopped cron job delays the escalation; it cannot cause one.
  *
+ * With Telegram set up as well, the owner hears about each step on both.
+ * The next of kin is not asked until the owner's reminders have been
+ * delivered on both, so one message lost to a spam folder or a dead
+ * channel cannot start the escalation on its own.
+ *
  * The owner can check in at any stage. Anyone already contacted is then
  * told it was a false alarm.
  */
@@ -118,7 +123,7 @@ final class Engine
                 $state['next_due_at'] = $this->nextSlot($config, $now);
                 $this->saveState($state);
                 $this->store->log('pause.ended', 'The pause ended. The switch is active again.');
-                $this->outbox->send($this->ownerAddresses($config), Messages::ownerPauseEnded($config, $state['next_due_at']));
+                $this->outbox->toOwner($this->ownerAddresses($config), Messages::ownerPauseEnded($config, $state['next_due_at']));
                 $did[] = 'Pause ended.';
             }
 
@@ -157,7 +162,7 @@ final class Engine
                         return;
                     }
                 }
-                if ($now >= $plan['verify']['at']) {
+                if ($now >= $plan['verify']['at'] && !$this->holdForChannels($state, $config, $now, $plan['verify']['at'], $did)) {
                     $this->askNextOfKin($state, $config, $now, $did);
                 }
                 return;
@@ -192,7 +197,8 @@ final class Engine
             array_column($this->warnings(), 'text')
         );
         // The clock for this cycle starts when the email is accepted, not when it was due.
-        if (!$this->outbox->send((string) $config['owner_email'], $email)) {
+        $reached = $this->outbox->toOwner([(string) $config['owner_email']], $email);
+        if ($reached === []) {
             $did[] = 'Could not send the check-in email. Will try again on the next run.';
             return;
         }
@@ -203,6 +209,8 @@ final class Engine
             'stage' => 'checkin',
             'tokens' => [$record],
             'reminders' => [],
+            'owner_reached' => array_fill_keys($reached, $now),
+            'chased_at' => null,
             'verify' => null,
             'fired_at' => null,
             'fired_reason' => null,
@@ -226,15 +234,96 @@ final class Engine
             $this->contacts->nok(),
             array_column($this->warnings(), 'text')
         );
-        if (!$this->outbox->send($this->ownerAddresses($config), $email)) {
+        $reached = $this->outbox->toOwner($this->ownerAddresses($config), $email);
+        if ($reached === []) {
             $did[] = "Could not send reminder {$number}. Will try again on the next run.";
             return;
         }
         $state['cycle']['tokens'][] = $record;
+        $this->markReached($state, $reached);
         $state['cycle']['reminders'][] = Clock::now();
         $this->saveState($state);
         $this->store->log('cycle.reminder', "Reminder {$number} sent to the owner.");
         $did[] = "Sent reminder {$number} to the owner.";
+    }
+
+    /** @param string[] $channels */
+    private function markReached(array &$state, array $channels): void
+    {
+        $state['cycle']['owner_reached'] = (array) ($state['cycle']['owner_reached'] ?? []) + array_fill_keys($channels, Clock::now());
+    }
+
+    /**
+     * The owner's channels that no reminder has reached this cycle.
+     *
+     * @return string[]
+     */
+    private function unreachedChannels(array $cycle, array $config): array
+    {
+        // Cycles started before channels were tracked were started by email.
+        $reached = (array) ($cycle['owner_reached'] ?? ['email' => $cycle['started_at']]);
+        return array_values(array_diff(Outbox::ownerChannels($config), array_keys($reached)));
+    }
+
+    /**
+     * Keep the next of kin waiting while a channel has not reached the owner,
+     * chasing the owner on it in the meantime. Gives up after CHANNEL_HOLD.
+     *
+     * @return bool true while holding
+     */
+    private function holdForChannels(array &$state, array $config, int $now, int $verifyAt, array &$did): bool
+    {
+        $missing = $this->unreachedChannels($state['cycle'], $config);
+        $chased = $state['cycle']['chased_at'] ?? null;
+        $holdUntil = $verifyAt + Schedule::CHANNEL_HOLD;
+        if ($missing === []) {
+            // A chase that got through gives the owner time to see it before the next of kin is asked.
+            return $chased !== null && $now < min($chased + Schedule::CHASE_EVERY, $holdUntil);
+        }
+        if ($now >= $holdUntil) {
+            if (empty($state['cycle']['hold_ended'])) {
+                $state['cycle']['hold_ended'] = true;
+                $this->store->log('cycle.hold_ended', 'Your reminders never reached you by ' . self::channelNames($missing)
+                    . ' in ' . duration(Schedule::CHANNEL_HOLD) . '. The next of kin is being asked anyway.');
+            }
+            return false;
+        }
+
+        if ($chased === null || $now >= $chased + Schedule::CHASE_EVERY) {
+            [$token, $record] = Tokens::issue(Schedule::CHECKIN_TOKEN_TTL);
+            $email = Messages::ownerChase(
+                $config,
+                $this->url($config, 'checkin.php', ['t' => $token]),
+                array_map([self::class, 'channelName'], array_keys((array) ($state['cycle']['owner_reached'] ?? ['email' => 0]))),
+                $holdUntil
+            );
+            $reached = $this->outbox->toOwner($this->ownerAddresses($config), $email, $missing);
+            $state['cycle']['tokens'][] = $record;
+            $state['cycle']['chased_at'] = $now;
+            $this->markReached($state, $reached);
+            $this->saveState($state);
+            if ($chased === null) {
+                $this->store->log('cycle.hold', 'No check-in after 72 hours, but your reminders have not reached you by '
+                    . self::channelNames($missing) . '. The next of kin will not be asked until they do.');
+            }
+            if ($reached !== []) {
+                $did[] = 'Reached the owner by ' . self::channelNames($reached) . '.';
+                return true;
+            }
+        }
+        $did[] = 'Holding: the owner has not been reached by ' . self::channelNames($missing) . '.';
+        return true;
+    }
+
+    private static function channelName(string $channel): string
+    {
+        return $channel === 'telegram' ? 'Telegram' : 'email';
+    }
+
+    /** @param string[] $channels */
+    private static function channelNames(array $channels): string
+    {
+        return implode(' or ', array_map([self::class, 'channelName'], $channels));
     }
 
     private function askNextOfKin(array &$state, array $config, int $now, array &$did): void
@@ -256,12 +345,12 @@ final class Engine
 
         // The owner is told too, with one more chance to check in.
         [$ownerToken, $ownerRecord] = Tokens::issue(Schedule::CHECKIN_TOKEN_TTL);
-        $ownerTold = $this->outbox->send(
+        $ownerTold = $this->outbox->toOwner(
             $this->ownerAddresses($config),
             Messages::ownerVerifyStarted($config, $this->url($config, 'checkin.php', ['t' => $ownerToken]), $nok, $fireAt)
         );
 
-        if (!$reached && !$ownerTold) {
+        if (!$reached && $ownerTold === []) {
             // No email is getting out at all. Wait for mail to work rather than escalate unseen.
             $did[] = 'Could not send any email. The escalation is waiting for mail to work.';
             return;
@@ -351,7 +440,7 @@ final class Engine
                 }
             }
             $state['cycle']['tokens'][] = $record;
-            if ($this->outbox->send(
+            if ($this->outbox->toOwner(
                 $this->ownerAddresses($config),
                 Messages::ownerFired($this->url($config, 'checkin.php', ['t' => $token]), $names)
             )) {
@@ -444,7 +533,7 @@ final class Engine
             }
             $result['alerted_at'] = $probe['alerted_at'] ?? null;
             if ($result['result'] === 'exposed' && $result['alerted_at'] === null) {
-                $this->outbox->send($this->ownerAddresses($config), Messages::ownerDataExposed($this->url($config, 'index.php')));
+                $this->outbox->toOwner($this->ownerAddresses($config), Messages::ownerDataExposed($this->url($config, 'index.php')));
                 $result['alerted_at'] = $now;
                 $this->store->log('probe.exposed', 'The data folder can be read from the web.');
                 $did[] = 'Warning sent: the data folder can be read from the web.';
@@ -473,7 +562,7 @@ final class Engine
         // Yearly: prompt the owner to review what each contact holds.
         if ($state['armed'] && $state['review_at'] !== null && $now >= $state['review_at'] + Schedule::YEAR) {
             if (($state['review_asked_at'] ?? 0) < $state['review_at']) {
-                if ($this->outbox->send((string) $config['owner_email'], Messages::ownerAnnualReview($this->url($config, 'index.php', ['p' => 'review'])))) {
+                if ($this->outbox->toOwner([(string) $config['owner_email']], Messages::ownerAnnualReview($this->url($config, 'index.php', ['p' => 'review']))) !== []) {
                     $state['review_asked_at'] = $now;
                     $this->saveState($state);
                     $did[] = 'Sent the yearly review prompt.';
@@ -507,7 +596,7 @@ final class Engine
             $state['review_at'] = $now;
             $this->saveState($state);
             $this->store->log('switch.armed', 'The switch was armed.');
-            $this->outbox->send($this->ownerAddresses($config), Messages::ownerArmed($config, $state['next_due_at']));
+            $this->outbox->toOwner($this->ownerAddresses($config), Messages::ownerArmed($config, $state['next_due_at']));
             return [];
         });
     }
@@ -527,7 +616,7 @@ final class Engine
             $state['next_due_at'] = null;
             $this->saveState($state);
             $this->store->log('switch.disarmed', 'The switch was disarmed. ' . $reason);
-            $this->outbox->send($this->ownerAddresses($config), Messages::ownerDisarmed($reason));
+            $this->outbox->toOwner($this->ownerAddresses($config), Messages::ownerDisarmed($reason));
             return $told;
         });
     }
@@ -699,7 +788,7 @@ final class Engine
             $state['next_due_at'] = $this->nextSlot($config, $now);
             $this->saveState($state);
             $this->store->log('cycle.vouched', 'The next of kin answered "All fine". Nobody else was contacted.');
-            $this->outbox->send($this->ownerAddresses($config), Messages::ownerVouched($config, $nok, $state['next_due_at']));
+            $this->outbox->toOwner($this->ownerAddresses($config), Messages::ownerVouched($config, $nok, $state['next_due_at']));
             return 'fine';
         });
     }
@@ -796,7 +885,7 @@ final class Engine
                 }
             }
 
-            $this->outbox->send($this->ownerAddresses($config), Messages::ownerContactAnswered($contact, $accept, $extra));
+            $this->outbox->toOwner($this->ownerAddresses($config), Messages::ownerContactAnswered($contact, $accept, $extra));
             return ['contact' => $contact, 'accepted' => $accept];
         });
     }
@@ -903,6 +992,14 @@ final class Engine
             'hint' => 'Recommended: an address with a different provider, in case your main one fails. Add it in Settings.',
         ];
 
+        $items[] = [
+            'key' => 'telegram',
+            'label' => 'A second way to reach you: Telegram',
+            'ok' => Outbox::telegramReady($config),
+            'blocking' => false,
+            'hint' => 'Recommended: reminders also go to Telegram, and your next of kin is not asked until a reminder has reached you both ways. Set it up in Settings.',
+        ];
+
         return $items;
     }
 
@@ -938,6 +1035,18 @@ final class Engine
             $out[] = ['key' => 'scheduler', 'level' => 'bad', 'text' => 'The scheduler has never run. Nothing will be sent until it does.'];
         } elseif ($now - $state['last_tick_at'] > Schedule::CRON_STALE) {
             $out[] = ['key' => 'scheduler', 'level' => 'bad', 'text' => 'The scheduler last ran ' . relative($state['last_tick_at']) . '. While it is stopped, the switch cannot send anything.'];
+        }
+
+        if (Outbox::telegramReady($config) && !empty($mail['telegram_error'])) {
+            $error = $mail['telegram_error'];
+            $out[] = ['key' => 'telegram', 'level' => 'bad', 'text' => 'The last Telegram message could not be sent (' . relative((int) $error['at']) . '): ' . $error['error']];
+        }
+
+        $cycle = $state['cycle'];
+        if ($state['armed'] && ($cycle['stage'] ?? null) === 'checkin' && !empty($cycle['chased_at'])
+            && ($missing = $this->unreachedChannels($cycle, $config)) !== []) {
+            $out[] = ['key' => 'channels', 'level' => 'bad', 'text' => 'You have not checked in, and your reminders have not reached you by '
+                . self::channelNames($missing) . '. Your next of kin will be asked once they do, or a week after the usual 72 hours.'];
         }
 
         if (!empty($mail['last_send_error'])) {

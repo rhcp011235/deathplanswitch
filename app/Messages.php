@@ -142,6 +142,28 @@ final class Messages
             ->p('This is a test from your Death Plan Switch. If you are reading it, the new mail settings work and have been saved.');
     }
 
+    public static function telegramTest(): Email
+    {
+        return (new Email('Death Plan Switch: Telegram is linked'))
+            ->p('This is a test from your Death Plan Switch. Your check-in emails and reminders will now come here too. A button press on either one checks you in.');
+    }
+
+    /**
+     * Sent on a channel that has not yet reached the owner this week. The
+     * next of kin waits until it does, or until $holdUntil.
+     *
+     * @param string[] $reached the channels that have reached the owner, as names
+     */
+    public static function ownerChase(array $config, string $url, array $reached, int $holdUntil): Email
+    {
+        $deadline = when($holdUntil, (string) ($config['timezone'] ?? 'UTC'), 'l j F \a\t g:ia');
+        return (new Email('Check in now: Death Plan Switch'))
+            ->p('You have not checked in this week, and your reminders have so far reached you only by '
+                . implode(' and ', $reached) . '. Your next of kin is not asked until a reminder has reached you every way you set up.')
+            ->link('Open the check-in page', $url)
+            ->p("Once this message is delivered, or by {$deadline} at the latest, your next of kin will be asked whether everything is all right.");
+    }
+
     /**
      * The weekly check-in, and its reminders.
      *

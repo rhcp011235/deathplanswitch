@@ -8,6 +8,33 @@ Death Plan Switch is a small, self-hosted dead man's switch for solo web profess
 
 It is one PHP app with no database. It holds no documents and no passwords. It is free, under the MIT licence.
 
+## This fork
+
+This is a personal fork, set up for one person who lives alone and whose first concern is **false alarms**: family or lawyers being told by mistake. The original only uses email. This fork adds a second channel for the owner, and makes the switch prove it has reached the owner before anyone else hears.
+
+### What changed from the original
+
+- **Telegram for the owner.** The weekly check-in, both reminders and every notice to the owner also arrive in Telegram, with a check-in button. One press on either the email or the Telegram button checks in. See [Telegram](#telegram).
+- **Two channels before family is asked.** The next of kin is not asked until a reminder has actually been delivered to the owner by both email and Telegram. One email lost to spam, or one dead channel, cannot start the escalation on its own.
+- **A failing channel is chased.** If either channel is failing at the 72-hour mark, the switch holds and retries that channel every 6 hours. Once a chase gets through, the owner has 6 hours to check in before the next of kin is asked.
+- **The hold has a limit.** A week past the usual 72 hours, the next of kin is asked anyway, so a broken bot cannot stop the switch from ever working. Being asked is not firing: the next of kin can still answer **All fine**. The limit is `CHANNEL_HOLD` in `app/Schedule.php`.
+- **Faults are loud.** A failed Telegram message or a held escalation shows on every page and turns the health address to `503`.
+- **Contacts are unchanged.** Family, the technical contact and the lawyer are still written to by email only.
+
+### How this install is meant to be set up
+
+1. **Mail through a big provider, not your own mail server.** Unreliable email mostly comes from running your own mail server, and the switch never does that. Either of these works in the installer's SMTP step:
+   - **Gmail:** `smtp.gmail.com`, port 587, TLS. Turn on 2-step verification, then make an **App password** to use as the SMTP password.
+   - **iCloud:** `smtp.mail.me.com`, port 587, TLS. Make an **app-specific password** at account.apple.com. The From address must be your iCloud address.
+2. **Add a backup email in Settings, at a different provider** (for example Gmail as the main address, iCloud as the backup). Reminders go to both.
+3. **Link Telegram in Settings** (about 2 minutes, see [Telegram](#telegram)), then press **Send a test message**.
+4. **Point a free uptime monitor at the health address.** The health address is how you are told the switch itself is broken.
+5. **Rehearse a full escalation** with `tests/timeshift.php`, using addresses you control, before trusting it.
+
+### Planned
+
+- **SMS or a phone call to family**, so they are not relying on email alone. Not built yet.
+
 ## How it works
 
 Everything is counted from the weekly check-in email.
@@ -17,7 +44,7 @@ Everything is counted from the weekly check-in email.
 | 0 hours | You are emailed a link to the check-in page. Pressing the button there is the check-in. |
 | 24 hours | A reminder, to both of your email addresses. |
 | 48 hours | A last reminder. |
-| 72 hours | Your next of kin is asked "Is everything all right?", with two answers: **All fine** or **Something's wrong**. You are told this has happened. |
+| 72 hours | Your next of kin is asked "Is everything all right?", with two answers: **All fine** or **Something's wrong**. You are told this has happened. With Telegram set up, this waits until a reminder has reached you by both email and Telegram (see below). |
 | 120 hours | Your next of kin is reminded. |
 | 144 hours (6 days) | If neither of you has confirmed you are well, every confirmed contact receives the message you wrote for them. |
 
@@ -33,7 +60,7 @@ Read this part before relying on it.
 
 - **It is a notification tool, not a guarantee.** It sends emails. It cannot know why you stopped checking in, cannot make anyone act, and cannot work if its server, its scheduler or its mail service is down. The sections below on separate hosting and on monitoring exist because of this.
 - **It stores no documents and no passwords.** Messages say where things are and who to call. Keep the documents themselves with people: a lawyer, your next of kin, your backup developer.
-- **It is email only.** No SMS, no phone calls, no app.
+- **It is email, plus Telegram for you if you want it.** Contacts are written to by email only. No SMS, no phone calls, no app.
 - **It is for one person.** One install, one owner. There are no accounts and no hosted version.
 - **It comes with no warranty** and best-effort support. See [Support](#support).
 
@@ -124,6 +151,18 @@ Run them as the user the web pages run as, for example `sudo -u www-data php tes
 Real emails go to your real contacts, so rehearse with addresses you control, or warn people first. Then check in, and watch the false-alarm notices go out.
 
 The `tests` folder is left out of release downloads. Get it from the repository. Delete it from your server when you have finished.
+
+## Telegram
+
+Optional, free, and recommended. Email can fail quietly: a filter, a full mailbox, a spam folder. Telegram gives the switch a second way to reach you.
+
+- **Set up:** in Telegram, ask **@BotFather** for a new bot (`/newbot`) and paste its token into Settings. Settings then gives you a link. Open it, press **Start**, and press **I have pressed Start**. A test message arrives. Make a new bot for this; do not reuse one that does other jobs.
+- **What changes:** your weekly check-in, the reminders and every notice to you also arrive on Telegram, with a check-in button. A press on either the email or the Telegram button checks you in.
+- **Two ways before your family hears.** Your next of kin is not asked until a reminder has been delivered to you both by email and by Telegram. If one of them is failing at the 72-hour mark, the switch holds and chases you on that channel every 6 hours. Once a chase gets through, you have 6 hours to check in before your next of kin is asked.
+- **It cannot hold for ever.** If a channel is still failing a week after the usual 72 hours, your next of kin is asked anyway, so a dead channel cannot stop the switch from ever working. Being asked is not the switch firing: they can still answer **All fine**.
+- While it holds, or whenever a Telegram message fails, every page shows a warning and the health address answers `503`.
+
+The bot only sends. Nothing has to reach your server from Telegram, so it works behind any firewall. The bot token is stored in the data folder, like your mail password.
 
 ## Day to day
 
