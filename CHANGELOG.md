@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Telegram, as a second way to reach the owner. Check-ins, reminders and notices go there too, with a check-in button.
+- With Telegram set up, the next of kin is not asked until a reminder has reached the owner by both email and Telegram. A failing channel is chased every 6 hours, for up to a week past the usual 72 hours.
+- Telegram failures, and a held escalation, show on every page and on the health address.
+
 ## 1.0.0, October 2026
 
 First public release.

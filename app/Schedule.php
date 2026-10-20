@@ -44,6 +44,21 @@ final class Schedule
      */
     public const MIN_STEP_GAP = 12 * self::HOUR;
 
+    /**
+     * With a second channel set up (Telegram), the next of kin is not asked
+     * until the owner's reminders have reached them on every channel. While
+     * one is failing, the owner is chased on it this often...
+     */
+    public const CHASE_EVERY = 6 * self::HOUR;
+
+    /**
+     * ...for at most this long past the usual 72 hours. After that the next
+     * of kin is asked anyway, so a channel that has died for good cannot
+     * stop the switch from ever working. Asking is not firing: the next of
+     * kin can still answer "All fine".
+     */
+    public const CHANNEL_HOLD = 7 * self::DAY;
+
     /** Check-in links stop working after this long. */
     public const CHECKIN_TOKEN_TTL = 14 * self::DAY;
 

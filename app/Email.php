@@ -52,6 +52,17 @@ final class Email
         return $this;
     }
 
+    /** @return array{label: string, url: string}|null the first link, for channels that show it as a button */
+    public function firstLink(): ?array
+    {
+        foreach ($this->blocks as $block) {
+            if ($block[0] === 'link') {
+                return ['label' => $block[1], 'url' => $block[2]];
+            }
+        }
+        return null;
+    }
+
     public function text(): string
     {
         $out = [];

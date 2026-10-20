@@ -18,6 +18,7 @@ use DPS\Contacts;
 use DPS\Email;
 use DPS\Engine;
 use DPS\Messages;
+use DPS\Messenger;
 use DPS\Outbox;
 use DPS\Schedule;
 use DPS\Store;
@@ -53,12 +54,35 @@ final class Recorder implements Transport
     }
 }
 
+/** Records Telegram messages instead of sending them, and can be told to fail. */
+final class ChatRecorder implements Messenger
+{
+    /** @var array<int, array{at: int, chat: string, text: string, button: ?array}> */
+    public array $sent = [];
+    public bool $down = false;
+
+    public function send(array $settings, string $text, ?array $button): void
+    {
+        if ($this->down) {
+            throw new \RuntimeException('Simulated Telegram failure');
+        }
+        $this->sent[] = ['at' => Clock::now(), 'chat' => (string) $settings['chat_id'], 'text' => $text, 'button' => $button];
+    }
+
+    /** @return array<int, array> messages whose first line contains $title */
+    public function titled(string $title): array
+    {
+        return array_values(array_filter($this->sent, static fn (array $m): bool => str_contains(strtok($m['text'], "\n"), $title)));
+    }
+}
+
 /** One throwaway install. */
 final class World
 {
     public string $dir;
     public Store $store;
     public Recorder $mail;
+    public ChatRecorder $chat;
     public Engine $engine;
     public string $probe = 'protected';
 
@@ -76,9 +100,10 @@ final class World
         Clock::set((new \DateTimeImmutable($start, new \DateTimeZone('Australia/Sydney')))->getTimestamp());
         $this->store = new Store($this->dir);
         $this->mail = new Recorder();
+        $this->chat = new ChatRecorder();
         $this->engine = new Engine(
             $this->store,
-            new Outbox($this->store, $this->mail),
+            new Outbox($this->store, $this->mail, $this->chat),
             fn (): array => ['result' => $this->probe, 'detail' => 'test', 'checked_at' => Clock::now()]
         );
         $this->store->write('config', [
@@ -132,6 +157,15 @@ final class World
             throw new \RuntimeException('Could not arm: ' . implode('; ', $errors));
         }
         return $w;
+    }
+
+    /** Link a Telegram chat, as Settings does. */
+    public function withTelegram(): self
+    {
+        $config = $this->store->read('config');
+        $config['telegram'] = ['bot_token' => '123456789:' . str_repeat('A', 35), 'bot_name' => 'sam_switch_bot', 'chat_id' => '4242', 'linked_at' => Clock::now()];
+        $this->store->write('config', $config);
+        return $this;
     }
 
     /** Run cron once an hour for $hours hours. */
@@ -960,6 +994,127 @@ test('disarming stops everything and tells anyone already contacted', function (
     $count = count($w->mail->sent);
     $w->hours(24 * 21);
     same($count, count($w->mail->sent), 'a disarmed switch sends nothing');
+});
+
+// ---------------------------------------------------------------------------
+// Telegram: a second way to reach the owner
+// ---------------------------------------------------------------------------
+
+test('without Telegram set up, nothing is sent there and nothing waits for it', function (): void {
+    $w = World::armed();
+    $w->until('2026-10-12 09:00');
+    $w->hours(72);
+    same([], $w->chat->sent, 'no Telegram messages');
+    same(1, count($w->to(World::NOK, 'all right')), 'the next of kin is asked at 72 hours as before');
+});
+
+test('with Telegram, the check-in and reminders go there too, with a button that checks in', function (): void {
+    $w = World::armed()->withTelegram();
+    $w->until('2026-10-12 09:00');
+    $checkin = $w->chat->titled('Check in with Death Plan Switch');
+    same(1, count($checkin), 'the weekly check-in arrives on Telegram');
+    same('4242', $checkin[0]['chat'], 'in the linked chat');
+    same('Open the check-in page', $checkin[0]['button']['label'] ?? null, 'with a button');
+    same(['email' => Clock::now(), 'telegram' => Clock::now()], $w->state()['cycle']['owner_reached'], 'both channels recorded');
+
+    $w->hours(24);
+    same(1, count($w->chat->titled('Reminder: check in')), 'the first reminder arrives on Telegram');
+
+    check(preg_match('~checkin\.php\?t=([A-Za-z0-9_-]+)~', (string) $w->chat->sent[1]['button']['url'], $m) === 1, 'the button links to the check-in page');
+    check($w->engine->checkInByToken($m[1]) !== null, 'pressing it checks in');
+    same(null, $w->state()['cycle'], 'the cycle is closed');
+});
+
+test('Telegram down all week: the next of kin waits while the owner is chased', function (): void {
+    $w = World::armed()->withTelegram();
+    $w->chat->down = true;
+    $w->until('2026-10-12 09:00');
+    $w->hours(72);
+    same(0, count($w->to(World::NOK)), 'the next of kin is not asked at 72 hours');
+    same('checkin', $w->state()['cycle']['stage'], 'still waiting on the owner');
+    $chases = $w->to(World::OWNER, 'Check in now');
+    same(0, count($chases), 'email already reached the owner, so it is not chased there');
+    check(in_array('channels', $w->engine->health()['problems'], true), 'the health check reports the hold');
+    check(in_array('telegram', $w->engine->health()['problems'], true), 'and the Telegram failure');
+
+    $w->hours(5);
+    same(0, count($w->to(World::NOK)), 'still waiting');
+
+    // Telegram comes back. The next chase gets through, and the owner gets 6 hours to see it.
+    $w->chat->down = false;
+    $w->hours(1);
+    same(1, count($w->chat->titled('Check in now')), 'the owner is chased on Telegram');
+    $w->hours(5);
+    same(0, count($w->to(World::NOK)), 'the next of kin waits 6 hours after the chase');
+    $w->hours(1);
+    same(1, count($w->to(World::NOK, 'all right')), 'then the next of kin is asked');
+    same(1, count($w->chat->titled('asked your next of kin')), 'and the owner is told on Telegram');
+});
+
+test('a chase on Telegram checks in like any other link', function (): void {
+    $w = World::armed()->withTelegram();
+    $w->chat->down = true;
+    $w->until('2026-10-12 09:00');
+    $w->hours(72);
+    $w->chat->down = false;
+    $w->hours(6);
+    $chase = $w->chat->titled('Check in now');
+    same(1, count($chase), 'chased');
+    check(preg_match('~checkin\.php\?t=([A-Za-z0-9_-]+)~', $chase[0]['text'], $m) === 1, 'the chase carries a link');
+    check($w->engine->checkInByToken($m[1]) !== null, 'it checks in');
+    $w->hours(24 * 6);
+    same(0, count($w->to(World::NOK)), 'the next of kin never hears');
+});
+
+test('Telegram dead for good: the next of kin is asked a week late, not never', function (): void {
+    $w = World::armed()->withTelegram();
+    $w->chat->down = true;
+    $w->until('2026-10-12 09:00');
+    $t0 = Clock::now();
+    $w->hours(72 + 7 * 24 - 1);
+    same(0, count($w->to(World::NOK)), 'held for a week past the usual 72 hours');
+    $w->hours(1);
+    $asked = $w->to(World::NOK, 'all right');
+    same(1, count($asked), 'then asked anyway');
+    same($t0 + 72 * H + 7 * D, $asked[0]['at'], 'exactly a week late');
+    $w->hours(72);
+    check(count($w->to(World::TECH)) > 0, 'and the switch can still fire');
+});
+
+test('email down but Telegram up: the next of kin waits for email too', function (): void {
+    $w = World::armed()->withTelegram();
+    $w->until('2026-10-12 09:00');
+    $w->mail->failWhen = static fn (array $to): bool => in_array(World::OWNER, $to, true) || in_array(World::BACKUP, $to, true);
+    $w->outage(1); // so the next run is the first with mail down
+    // Wipe what email achieved so far, as if the weekly email had gone by Telegram only.
+    $state = $w->state();
+    $state['cycle']['owner_reached'] = ['telegram' => $state['cycle']['started_at']];
+    $w->engine->saveState($state);
+
+    $w->hours(72);
+    same(0, count($w->to(World::NOK)), 'the next of kin is not asked');
+    $w->mail->failWhen = null;
+    $w->hours(6);
+    same(1, count($w->to(World::OWNER, 'Check in now')), 'the owner is chased by email once it works');
+    check(str_contains($w->to(World::OWNER, 'Check in now')[0]['text'], 'only by Telegram'), 'saying how they were reached');
+});
+
+test('a cycle started before Telegram was set up is not held up by it', function (): void {
+    $w = World::armed();
+    $w->until('2026-10-12 09:00');
+    $state = $w->state();
+    unset($state['cycle']['owner_reached']); // as written by the previous version
+    $w->engine->saveState($state);
+    $w->hours(72);
+    same(1, count($w->to(World::NOK, 'all right')), 'asked on time');
+});
+
+test('Telegram messages carry the same words as the email', function (): void {
+    $w = World::armed()->withTelegram();
+    $w->until('2026-10-12 09:00');
+    $email = $w->to(World::OWNER, 'Check in with')[0];
+    $chat = $w->chat->titled('Check in with')[0];
+    same($email['subject'] . "\n\n" . trim($email['text']), $chat['text'], 'same text');
 });
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ Web::requireOwner();
 $engine = engine();
 $store = store();
 $config = $engine->config();
-$outbox = new Outbox($store, new SmtpTransport());
+$outbox = new Outbox($store, new SmtpTransport(), new Telegram());
 
 if (Web::posted()) {
     switch (Web::post('action')) {
@@ -81,6 +81,74 @@ if (Web::posted()) {
             $config['backup_email'] = '';
             $store->write('config', $config);
             Web::flash('Backup address removed. Reminders now go to your main address only.', 'warn');
+            break;
+
+        case 'telegram_token':
+            $token = Web::post('bot_token');
+            if (!Telegram::validToken($token)) {
+                Web::flash('That does not look like a bot token. BotFather gives one like 123456789:AAH…, about 46 characters long.', 'bad');
+                break;
+            }
+            try {
+                $bot = Telegram::botName($token);
+            } catch (\RuntimeException $e) {
+                Web::flash('Not saved. ' . $e->getMessage(), 'bad');
+                break;
+            }
+            $config['telegram'] = [
+                'bot_token' => $token,
+                'bot_name' => $bot,
+                'chat_id' => null,
+                'link_code' => bin2hex(random_bytes(8)),
+                'linked_at' => null,
+            ];
+            $store->write('config', $config);
+            Web::flash("Found your bot, @{$bot}. Now link it to your chat, below.");
+            break;
+
+        case 'telegram_link':
+            $telegram = (array) ($config['telegram'] ?? []);
+            if (empty($telegram['bot_token']) || empty($telegram['link_code'])) {
+                break;
+            }
+            try {
+                $chat = Telegram::findStart((string) $telegram['bot_token'], (string) $telegram['link_code']);
+            } catch (\RuntimeException $e) {
+                Web::flash($e->getMessage(), 'bad');
+                break;
+            }
+            if ($chat === null) {
+                Web::flash('Your bot has not seen the Start press yet. Open the link, press Start in Telegram, then try again.', 'warn');
+                break;
+            }
+            $telegram['chat_id'] = $chat;
+            if (!$outbox->telegram(Messages::telegramTest(), $telegram)) {
+                $error = $store->read('mail')['telegram_error']['error'] ?? 'unknown error';
+                Web::flash('Not linked: a test message could not be sent. ' . $error, 'bad');
+                break;
+            }
+            $telegram['link_code'] = null;
+            $telegram['linked_at'] = Clock::now();
+            $config['telegram'] = $telegram;
+            $store->write('config', $config);
+            $store->log('settings.telegram', 'Telegram was linked. Reminders now go there too.');
+            Web::flash('Linked. A test message has been sent to your Telegram.');
+            break;
+
+        case 'telegram_test':
+            if (Outbox::telegramReady($config) && $outbox->telegram(Messages::telegramTest())) {
+                Web::flash('A test message has been sent to your Telegram.');
+            } else {
+                $error = $store->read('mail')['telegram_error']['error'] ?? 'Telegram is not set up.';
+                Web::flash('The test message could not be sent. ' . $error, 'bad');
+            }
+            break;
+
+        case 'telegram_remove':
+            unset($config['telegram']);
+            $store->write('config', $config);
+            $store->log('settings.telegram', 'Telegram was removed. Reminders go by email only.');
+            Web::flash('Telegram removed. Reminders now go by email only.', 'warn');
             break;
 
         case 'smtp':
@@ -254,6 +322,50 @@ Web::$title = 'Settings: Death Plan Switch';
   <form method="post" action="index.php?p=settings"><?= Web::csrfField() ?><input type="hidden" name="action" value="backup_remove"><button class="link" type="submit">Remove the backup address</button></form>
 <?php endif ?>
 </details>
+
+<h2>Telegram</h2>
+<?php $telegram = (array) ($config['telegram'] ?? []); ?>
+<p>Telegram is a second way to reach you, and it is free. Your check-in emails and reminders also arrive as Telegram messages with a check-in button. A press on either one checks you in. Your next of kin is not asked until a reminder has reached you both ways, so one email lost in a spam folder cannot start the escalation.</p>
+<?php if (Outbox::telegramReady($config)): ?>
+<dl class="facts">
+  <dt>Bot</dt><dd>@<?= e($telegram['bot_name'] ?? '') ?></dd>
+  <dt>Linked</dt><dd><?= e(relative((int) ($telegram['linked_at'] ?? 0))) ?></dd>
+</dl>
+<div class="actions">
+  <form method="post" action="index.php?p=settings"><?= Web::csrfField() ?><input type="hidden" name="action" value="telegram_test"><button class="button-quiet" type="submit">Send a test message</button></form>
+  <form method="post" action="index.php?p=settings"><?= Web::csrfField() ?><input type="hidden" name="action" value="telegram_remove"><button class="link" type="submit" data-confirm="Remove Telegram? Reminders will go by email only.">Remove Telegram</button></form>
+</div>
+<?php elseif (!empty($telegram['link_code'])): ?>
+<div class="panel">
+  <h3>Link @<?= e($telegram['bot_name'] ?? '') ?> to your chat</h3>
+  <ol>
+    <li>Open <a href="https://t.me/<?= e(rawurlencode((string) ($telegram['bot_name'] ?? ''))) ?>?start=<?= e($telegram['link_code']) ?>" rel="noopener noreferrer" target="_blank">t.me/<?= e($telegram['bot_name'] ?? '') ?></a> on the phone you use Telegram on.</li>
+    <li>Press <strong>Start</strong> in Telegram.</li>
+    <li>Come back here and press the button below.</li>
+  </ol>
+  <form method="post" action="index.php?p=settings"><?= Web::csrfField() ?><input type="hidden" name="action" value="telegram_link"><button type="submit">I have pressed Start</button></form>
+  <form method="post" action="index.php?p=settings"><?= Web::csrfField() ?><input type="hidden" name="action" value="telegram_remove"><button class="link" type="submit">Cancel</button></form>
+</div>
+<?php else: ?>
+<details>
+  <summary>Set up Telegram</summary>
+  <ol>
+    <li>In Telegram, open a chat with <strong>@BotFather</strong> and send <code>/newbot</code>.</li>
+    <li>Give it any name, and a username ending in <code>bot</code>. Make a new bot for this: do not reuse one that does other jobs.</li>
+    <li>BotFather replies with a token. Paste it here.</li>
+  </ol>
+  <form method="post" action="index.php?p=settings">
+    <?= Web::csrfField() ?>
+    <input type="hidden" name="action" value="telegram_token">
+    <div class="field">
+      <label for="bot_token">Bot token</label>
+      <input type="text" id="bot_token" name="bot_token" required maxlength="80" autocomplete="off" spellcheck="false">
+      <span class="help">Stored in the data folder, like your mail password. Anyone with it can send messages as your bot, but cannot read your chats.</span>
+    </div>
+    <button type="submit">Check the token</button>
+  </form>
+</details>
+<?php endif ?>
 
 <h2>Mail server</h2>
 <form method="post" action="index.php?p=settings">
